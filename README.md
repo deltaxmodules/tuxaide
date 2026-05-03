@@ -25,7 +25,11 @@ curl -fsSL https://raw.githubusercontent.com/deltaxmodules/tuxaide/main/setup.sh
 The installer handles everything automatically — Ollama, the AI model, the shell hook. When it finishes, run:
 
 ```bash
+# Linux (bash)
 source ~/.bashrc
+
+# macOS (zsh — default on Mac)
+source ~/.zshrc
 ```
 
 Then just start typing questions.
@@ -212,6 +216,33 @@ Not a single packet left the server. You can reproduce this test yourself at any
 
 ---
 
+## 🍎 macOS notes
+
+macOS uses **zsh** by default (not bash). After installing, always run:
+
+```bash
+source ~/.zshrc
+```
+
+Running `source ~/.bashrc` on a Mac will cause an error — use `.zshrc` instead.
+
+If TuxAide does not respond after sourcing, add the hook manually:
+
+```bash
+echo 'source "$HOME/.config/tuxaide/hook.sh"  # TuxAide' >> ~/.zshrc
+source ~/.zshrc
+```
+
+Then verify it is working:
+
+```bash
+tuxaide status
+```
+
+Also note: on macOS, Ollama is installed as a desktop app. If the automatic installer fails, download it manually from [ollama.com](https://ollama.com), open the app once, and then re-run the TuxAide installer.
+
+---
+
 ## Uninstall
 
 ```bash
@@ -221,8 +252,15 @@ tuxaide-uninstall
 Removes the agent, the hook and all config files. Ollama and models are kept (remove manually if needed):
 
 ```bash
+# Linux
 sudo systemctl stop ollama
 sudo rm $(which ollama)
+rm -rf ~/.ollama
+
+# macOS
+killall ollama 2>/dev/null || true
+rm -rf /Applications/Ollama.app
+sudo rm -f /usr/local/bin/ollama
 rm -rf ~/.ollama
 ```
 
