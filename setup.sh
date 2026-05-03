@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # ══════════════════════════════════════════════════════════════════════
-#  LinuxGenie — Complete Installer
-#  https://github.com/deltaxmodules/linuxgenie
+#  TuxAide — Complete Installer
+#  https://github.com/deltaxmodules/tuxaide
 #
 #  One-liner install:
-#    curl -fsSL https://raw.githubusercontent.com/deltaxmodules/linuxgenie/main/setup.sh | bash
+#    curl -fsSL https://raw.githubusercontent.com/deltaxmodules/tuxaide/main/setup.sh | bash
 #
 #  What it does:
 #    1. Detects distro, architecture and RAM
@@ -12,12 +12,12 @@
 #    3. Installs Ollama (if not present)
 #    4. Registers Ollama as a systemd service (starts on boot)
 #    5. Downloads the AI model best suited to the hardware
-#    6. Installs the LinuxGenie agent (~/.local/bin/linuxgenie)
+#    6. Installs the TuxAide agent (~/.local/bin/tuxaide)
 #    7. Adds the hook to ~/.bashrc / ~/.zshrc
 #    8. Activates IMMEDIATELY in the current session
 #
-#  To disable:    genie off
-#  To uninstall:  linuxgenie-uninstall
+#  To disable:    tuxaide off
+#  To uninstall:  tuxaide-uninstall
 # ══════════════════════════════════════════════════════════════════════
 
 set -euo pipefail
@@ -31,8 +31,8 @@ banner() {
     clear 2>/dev/null || true
     echo ""
     echo -e "${CY}${BOLD}╔══════════════════════════════════════════════════════╗${R}"
-    echo -e "${CY}${BOLD}║   🧞  LinuxGenie — Complete Installer               ║${R}"
-    echo -e "${CY}${BOLD}║   Local AI agent for your Linux terminal (Ollama)   ║${R}"
+    echo -e "${CY}${BOLD}║   🐧  TuxAide — Complete Installer               ║${R}"
+    echo -e "${CY}${BOLD}║   Local AI assistant for your Linux terminal (Ollama)   ║${R}"
     echo -e "${CY}${BOLD}╚══════════════════════════════════════════════════════╝${R}"
     echo ""
 }
@@ -312,22 +312,22 @@ download_model() {
 }
 
 # ═══════════════════════════════════════════════════════════════════════
-# STEP 5 — LinuxGenie Agent
+# STEP 5 — TuxAide Agent
 # ═══════════════════════════════════════════════════════════════════════
 install_agent() {
-    step "Installing LinuxGenie agent"
+    step "Installing TuxAide agent"
 
     local BIN="${HOME}/.local/bin"
-    local CFG="${HOME}/.config/linuxgenie"
+    local CFG="${HOME}/.config/tuxaide"
     mkdir -p "$BIN" "$CFG"
 
     # ── Main Python binary ─────────────────────────────────────────────
-    cat > "${BIN}/linuxgenie" << 'PYEOF'
+    cat > "${BIN}/tuxaide" << 'PYEOF'
 #!/usr/bin/env python3
-"""LinuxGenie — Local AI agent for the Linux terminal (Ollama)."""
+"""TuxAide — Local AI agent for the Linux terminal (Ollama)."""
 import sys, os, re, json, urllib.request, urllib.error, textwrap, shutil
 
-CFG_FILE = os.path.expanduser("~/.config/linuxgenie/config.json")
+CFG_FILE = os.path.expanduser("~/.config/tuxaide/config.json")
 DEFAULTS = {"ollama_url":"http://localhost:11434","model":"qwen2.5-coder:7b",
             "max_tokens":600,"temperature":0.1,"color":True}
 
@@ -371,7 +371,7 @@ CMDS = {'ls','cd','pwd','mkdir','rm','cp','mv','cat','echo','grep','find',
         'ss','lsof','file','stat','touch','ln','date','uptime','who','id',
         'crontab','screen','tmux','xargs','tee','tr','rsync','nc','iptables',
         'ufw','service','snap','flatpak','node','npm','npx','yarn','go',
-        'ruby','perl','php','source','ollama','genie','lg','linuxgenie'}
+        'ruby','perl','php','source','ollama','genie','lg','tuxaide','tux'}
 
 def is_q(text):
     t = text.strip().lower()
@@ -454,8 +454,8 @@ def fmt(text, c):
     color = c.get("color", True)
     top = (f"{C.Y}{C.B}╭{'─'*(cols-2)}╮{C.Z}" if color else f"┌{'─'*(cols-2)}┐")
     bot = (f"{C.Y}{C.B}╰{'─'*(cols-2)}╯{C.Z}" if color else f"└{'─'*(cols-2)}┘")
-    lbl = (f"{C.Y}{C.B}╞═ 🧞 LinuxGenie {C.D}(Ollama · {c['model']}){C.Z}{C.Y}{C.B} ═╡{C.Z}"
-           if color else f"╞═ LinuxGenie ═╡")
+    lbl = (f"{C.Y}{C.B}╞═ 🐧 TuxAide {C.D}(Ollama · {c['model']}){C.Z}{C.Y}{C.B} ═╡{C.Z}"
+           if color else f"╞═ TuxAide ═╡")
     out = ["", top, lbl]
     in_code = False
     for line in text.split('\n'):
@@ -500,8 +500,8 @@ def main():
 
 if __name__ == "__main__": main()
 PYEOF
-    chmod +x "${BIN}/linuxgenie"
-    ok "Binary installed → ${BIN}/linuxgenie"
+    chmod +x "${BIN}/tuxaide"
+    ok "Binary installed → ${BIN}/tuxaide"
 
     # ── Config ─────────────────────────────────────────────────────────
     cat > "${CFG}/config.json" << JEOF
@@ -517,45 +517,46 @@ JEOF
 
     # ── Shell hook ─────────────────────────────────────────────────────
     cat > "${CFG}/hook.sh" << 'HOOKEOF'
-# ── LinuxGenie hook ── loaded by ~/.bashrc / ~/.zshrc ──────────────
-_LG="${HOME}/.local/bin/linuxgenie"
+# ── TuxAide hook ── loaded by ~/.bashrc / ~/.zshrc ──────────────
+_LG="${HOME}/.local/bin/tuxaide"
 _LG_ON=true
 
-# Explicit command: genie / lg
-genie() {
+# Explicit command: tuxaide / tux / lg
+tuxaide() {
     [[ -z "${1:-}" ]] && {
-        echo "🧞 LinuxGenie"
-        echo "   genie <question>    — ask a question"
-        echo "   genie on / off      — enable / disable hook"
-        echo "   genie status        — show current status"
-        echo "   genie model <name>  — change Ollama model"
+        echo "🐧 TuxAide"
+        echo "   tuxaide <question>    — ask a question"
+        echo "   tuxaide on / off      — enable / disable hook"
+        echo "   tuxaide status        — show current status"
+        echo "   tuxaide model <name>  — change Ollama model"
         return
     }
     case "$1" in
-        on)           _LG_ON=true;  echo "🧞 LinuxGenie ENABLED" ;;
-        off)          _LG_ON=false; echo "🧞 LinuxGenie DISABLED" ;;
-        status)       [[ "$_LG_ON" == "true" ]] && echo "🧞 Status: ACTIVE" || echo "🧞 Status: INACTIVE" ;;
+        on)           _LG_ON=true;  echo "🐧 TuxAide ENABLED" ;;
+        off)          _LG_ON=false; echo "🐧 TuxAide DISABLED" ;;
+        status)       [[ "$_LG_ON" == "true" ]] && echo "🐧 Status: ACTIVE" || echo "🐧 Status: INACTIVE" ;;
         model|modelo)
             local m="${2:-}"
-            [[ -z "$m" ]] && { echo "Usage: genie model <name>"; return; }
+            [[ -z "$m" ]] && { echo "Usage: tuxaide model <name>"; return; }
             python3 -c "
 import json, os
-f = os.path.expanduser('~/.config/linuxgenie/config.json')
+f = os.path.expanduser('~/.config/tuxaide/config.json')
 with open(f) as fp: c = json.load(fp)
 c['model'] = '$m'
 with open(f,'w') as fp: json.dump(c, fp, indent=4)
-print('🧞 Model changed to: $m')
+print('🐧 Model changed to: $m')
 "       ;;
         *) "$_LG" --ask "$*" ;;
     esac
 }
-alias lg='genie'
+alias tux='tuxaide'
+alias lg='tuxaide'
 
 # ── Automatic hook via command_not_found_handle ────────────────────
 # Bash calls this when a command does not exist.
 # Natural language questions start with a word that is not a command,
 # so bash invokes this handler. We get the full line from history
-# and pass it to LinuxGenie.
+# and pass it to TuxAide.
 command_not_found_handle() {
     local cmd="$1"
     [[ "$_LG_ON" != "true" ]] && {
@@ -587,21 +588,21 @@ HOOKEOF
     ok "Hook installed → ${CFG}/hook.sh"
 
     # ── Uninstaller ────────────────────────────────────────────────────
-    cat > "${BIN}/linuxgenie-uninstall" << 'UEOF'
+    cat > "${BIN}/tuxaide-uninstall" << 'UEOF'
 #!/usr/bin/env bash
 R="\033[0m"; GR="\033[32m"; RD="\033[31m"; YL="\033[33m"; BOLD="\033[1m"
 echo ""
-echo -e "${RD}${BOLD}  🧞  LinuxGenie — Uninstall${R}"
+echo -e "${RD}${BOLD}  🐧  TuxAide — Uninstall${R}"
 echo ""
-read -rp "  Are you sure? This removes LinuxGenie completely. [y/N] " a
+read -rp "  Are you sure? This removes TuxAide completely. [y/N] " a
 [[ "$a" =~ ^[yYsS]$ ]] || { echo "  Cancelled."; exit 0; }
 for rc in ~/.bashrc ~/.zshrc ~/.profile; do
     [[ -f "$rc" ]] || continue
-    grep -v "LinuxGenie" "$rc" > /tmp/_lg_rc && mv /tmp/_lg_rc "$rc"
+    grep -v "TuxAide" "$rc" > /tmp/_lg_rc && mv /tmp/_lg_rc "$rc"
     echo -e "  ${GR}✓${R} Removed from $rc"
 done
-rm -f ~/.local/bin/linuxgenie ~/.local/bin/linuxgenie-uninstall
-rm -rf ~/.config/linuxgenie
+rm -f ~/.local/bin/tuxaide ~/.local/bin/tuxaide-uninstall
+rm -rf ~/.config/tuxaide
 echo -e "  ${GR}✓${R} Files removed"
 echo ""
 echo -e "  ${YL}Note: Ollama and models were NOT removed.${R}"
@@ -610,8 +611,8 @@ echo ""
 echo -e "  ${GR}${BOLD}Done. Restart your terminal.${R}"
 echo ""
 UEOF
-    chmod +x "${BIN}/linuxgenie-uninstall"
-    ok "Uninstaller → ${BIN}/linuxgenie-uninstall"
+    chmod +x "${BIN}/tuxaide-uninstall"
+    ok "Uninstaller → ${BIN}/tuxaide-uninstall"
 }
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -620,10 +621,10 @@ UEOF
 activate_shell() {
     step "Activating in shell"
 
-    local CFG="${HOME}/.config/linuxgenie"
+    local CFG="${HOME}/.config/tuxaide"
     local BIN="${HOME}/.local/bin"
-    local HOOK_LINE="source \"${CFG}/hook.sh\"  # LinuxGenie"
-    local PATH_LINE="export PATH=\"\$HOME/.local/bin:\$PATH\"  # LinuxGenie"
+    local HOOK_LINE="source \"${CFG}/hook.sh\"  # TuxAide"
+    local PATH_LINE="export PATH=\"\$HOME/.local/bin:\$PATH\"  # TuxAide"
 
     local -a RCS=()
     [[ "$CURRENT_SHELL" == "zsh"  ]] && RCS+=("${HOME}/.zshrc")
@@ -638,7 +639,7 @@ activate_shell() {
             ok "PATH added to $RC"
         fi
 
-        if grep -qF "linuxgenie/hook.sh" "$RC" 2>/dev/null; then
+        if grep -qF "tuxaide/hook.sh" "$RC" 2>/dev/null; then
             ok "Hook already present in $RC"
         else
             { echo ""; echo "$HOOK_LINE"; } >> "$RC"
@@ -679,13 +680,13 @@ final_check() {
         warn "Model $MODEL available  ← FAILED"; fail_count=$((fail_count+1))
     fi
 
-    if test -x "${HOME}/.local/bin/linuxgenie"; then
-        ok "linuxgenie binary"; ok_count=$((ok_count+1))
+    if test -x "${HOME}/.local/bin/tuxaide"; then
+        ok "tuxaide binary"; ok_count=$((ok_count+1))
     else
-        warn "linuxgenie binary  ← FAILED"; fail_count=$((fail_count+1))
+        warn "tuxaide binary  ← FAILED"; fail_count=$((fail_count+1))
     fi
 
-    if grep -q "linuxgenie/hook.sh" "${HOME}/.bashrc" 2>/dev/null; then
+    if grep -q "tuxaide/hook.sh" "${HOME}/.bashrc" 2>/dev/null; then
         ok "Hook in .bashrc"; ok_count=$((ok_count+1))
     else
         warn "Hook in .bashrc  ← FAILED"; fail_count=$((fail_count+1))
@@ -703,7 +704,7 @@ final_check() {
 print_summary() {
     echo ""
     echo -e "${CY}${BOLD}╔══════════════════════════════════════════════════════╗${R}"
-    echo -e "${CY}${BOLD}║   🧞  LinuxGenie installed and ready!               ║${R}"
+    echo -e "${CY}${BOLD}║   🐧  TuxAide installed and ready!               ║${R}"
     echo -e "${CY}${BOLD}╚══════════════════════════════════════════════════════╝${R}"
     echo ""
     echo -e "  ${YL}${BOLD}⚡ Required — run this now to activate:${R}"
@@ -716,18 +717,18 @@ print_summary() {
     echo -e "  ${CY}how do I list hidden files${R}"
     echo -e "  ${CY}como listar ficheiros ocultos${R}"
     echo -e "  ${CY}comment lister les fichiers cachés${R}"
-    echo -e "  ${CY}genie what is the difference between chmod and chown${R}"
+    echo -e "  ${CY}tuxaide what is the difference between chmod and chown${R}"
     echo -e "  ${CY}lg how to check open ports${R}"
     echo ""
     echo -e "  ${BOLD}Controls:${R}"
-    echo -e "  ${CY}genie off${R}     — disable temporarily"
-    echo -e "  ${CY}genie on${R}      — re-enable"
-    echo -e "  ${CY}genie status${R}  — show status"
+    echo -e "  ${CY}tuxaide off${R}     — disable temporarily"
+    echo -e "  ${CY}tuxaide on${R}      — re-enable"
+    echo -e "  ${CY}tuxaide status${R}  — show status"
     echo ""
     echo -e "  ${BOLD}Uninstall completely:${R}"
-    echo -e "  ${CY}linuxgenie-uninstall${R}"
+    echo -e "  ${CY}tuxaide-uninstall${R}"
     echo ""
-    echo -e "  ${DIM}Model: ${MODEL} | Config: ~/.config/linuxgenie/config.json${R}"
+    echo -e "  ${DIM}Model: ${MODEL} | Config: ~/.config/tuxaide/config.json${R}"
     echo ""
 }
 
