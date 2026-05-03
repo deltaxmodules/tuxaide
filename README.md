@@ -1,6 +1,6 @@
-# 🧞 LinuxGenie
+# 🐧 TuxAide
 
-> **Local AI agent for your Linux terminal.**  
+> **Local AI assistant for your Linux terminal.**  
 > Type your question directly. Get an answer inline. No cloud. No API keys. No subscriptions. Forever free.
 
 <div align="center">
@@ -19,7 +19,7 @@
 One command. That's it.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/deltaxmodules/linuxgenie/main/setup.sh | bash
+curl -fsSL https://raw.githubusercontent.com/deltaxmodules/tuxaide/main/setup.sh | bash
 ```
 
 The installer handles everything automatically — Ollama, the AI model, the shell hook. When it finishes, run:
@@ -40,11 +40,11 @@ Write your Linux question directly in the terminal, as if it were a command:
 $ how do I list hidden files sorted by size
 ```
 
-LinuxGenie intercepts it silently and answers inline:
+TuxAide intercepts it silently and answers inline:
 
 ```
 ╭──────────────────────────────────────────────────────────────╮
-╞═ 🧞 LinuxGenie (Ollama · qwen2.5-coder:7b) ═╡
+╞═ 🐧 TuxAide (Ollama · qwen2.5-coder:7b) ═╡
 
   To list hidden files sorted by size:
 
@@ -65,11 +65,11 @@ Normal commands (`ls -la`, `git commit`, `sudo apt update`) pass through untouch
 
 ## Any language
 
-LinuxGenie detects your language automatically and always replies in the same language you used:
+TuxAide detects your language automatically and always replies in the same language you used:
 
 ```bash
 how do I check open ports              # → English
-como listar ficheiros ocultos          # → Portuguese  
+como listar ficheiros ocultos          # → Portuguese
 comment lister les fichiers cachés     # → French
 cómo ver el espacio en disco           # → Spanish
 wie zeige ich offene Ports             # → German
@@ -86,7 +86,7 @@ wie zeige ich offene Ports             # → German
 | 3 | Installs Ollama (local AI engine) |
 | 4 | Registers Ollama as a systemd service (starts on boot) |
 | 5 | Downloads the AI model best suited to your hardware |
-| 6 | Installs the LinuxGenie agent |
+| 6 | Installs the TuxAide agent |
 | 7 | Adds the hook to your ~/.bashrc or ~/.zshrc |
 
 ---
@@ -104,8 +104,8 @@ how to create a sudo user on Ubuntu
 what does the -z flag do in grep
 
 # Explicit mode also works:
-genie how to check disk usage by folder
-lg what is the difference between hard and soft links
+tuxaide how to check disk usage by folder
+tux what is the difference between hard and soft links
 ```
 
 ---
@@ -113,12 +113,12 @@ lg what is the difference between hard and soft links
 ## Controls
 
 ```bash
-genie on                   # enable automatic hook
-genie off                  # disable (terminal works normally)
-genie status               # show current status
-genie model llama3.2       # switch Ollama model
+tuxaide on                  # enable automatic hook
+tuxaide off                 # disable (terminal works normally)
+tuxaide status              # show current status
+tuxaide model llama3.2      # switch Ollama model
 
-linuxgenie-uninstall       # remove completely
+tuxaide-uninstall           # remove completely
 ```
 
 ---
@@ -138,14 +138,14 @@ The installer picks the **best model for Linux knowledge**, not just the smalles
 To switch model at any time:
 ```bash
 ollama pull mistral
-genie model mistral
+tuxaide model mistral
 ```
 
 ---
 
 ## 🔒 Data Sovereignty
 
-LinuxGenie was designed from the ground up for environments where **data cannot leave the server.**
+TuxAide was designed from the ground up for environments where **data cannot leave the server.**
 
 - All AI processing runs locally via Ollama — no external calls, ever
 - No data is sent to any server, cloud provider or third party
@@ -157,10 +157,10 @@ LinuxGenie was designed from the ground up for environments where **data cannot 
 
 ```
 $ sudo tcpdump -i any host ollama.com &
-$ genie how do I list open ports
+$ tuxaide how do I list open ports
 
 tcpdump: listening on any, link-type LINUX_SLL2
-[... LinuxGenie answers fully ...]
+[... TuxAide answers fully ...]
 ^C
 0 packets captured
 0 packets received by filter
@@ -189,9 +189,9 @@ Not a single packet left the server. You can reproduce this test yourself at any
 
 ---
 
-## Why LinuxGenie vs alternatives
+## Why TuxAide vs alternatives
 
-| | LinuxGenie | ShellGPT | Warp | GitHub Copilot CLI |
+| | TuxAide | ShellGPT | Warp | GitHub Copilot CLI |
 |---|---|---|---|---|
 | 100% local | ✅ | ❌ | ❌ | ❌ |
 | No API key | ✅ | ❌ | ❌ | ❌ |
@@ -207,7 +207,7 @@ Not a single packet left the server. You can reproduce this test yourself at any
 ## Uninstall
 
 ```bash
-linuxgenie-uninstall
+tuxaide-uninstall
 ```
 
 Removes the agent, the hook and all config files. Ollama and models are kept (remove manually if needed):
@@ -223,7 +223,7 @@ rm -rf ~/.ollama
 ## Repository
 
 ```
-linuxgenie/
+tuxaide/
 ├── setup.sh     ← complete self-contained installer
 └── README.md
 ```
@@ -234,10 +234,10 @@ linuxgenie/
 
 ## Contributing
 
-Issues, pull requests and feedback welcome at [github.com/deltaxmodules/linuxgenie](https://github.com/deltaxmodules/linuxgenie).
+Issues, pull requests and feedback welcome at [github.com/deltaxmodules/tuxaide](https://github.com/deltaxmodules/tuxaide).
 
 ---
 
 <div align="center">
-<sub>Built with ❤️ · Powered by <a href="https://ollama.com">Ollama</a> · 100% local · 100% private</sub>
+<sub>🐧 Built with ❤️ · Powered by <a href="https://ollama.com">Ollama</a> · Named after Tux, the Linux mascot · 100% local · 100% private</sub>
 </div>
