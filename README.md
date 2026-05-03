@@ -1,7 +1,7 @@
 # 🐧 TuxAide
 
 > **Local AI assistant for your Linux terminal.**  
-> Type your question directly. Get an answer inline. No cloud. No API keys. No subscriptions. Forever free.
+> Designed for new Linux users — no remembering flags, no web searches, just ask your terminal.
 
 <div align="center">
 
@@ -56,10 +56,33 @@ TuxAide intercepts it silently and answers inline:
   -h shows human-readable sizes (KB, MB, GB).
   To reverse: ls -laShr
 
+  ⚠ Always verify commands before running them.
+
 ╰──────────────────────────────────────────────────────────────╯
 ```
 
 Normal commands (`ls -la`, `git commit`, `sudo apt update`) pass through untouched. **Zero interference.**
+
+---
+
+## What makes TuxAide different
+
+Most AI terminal tools exist. Here is why TuxAide is not just another one:
+
+**1. No trigger word needed.**  
+Every other tool requires you to type `ask`, `hey`, `lumo`, `lexido` or similar before your question. TuxAide hooks into the shell's `command_not_found` handler — you just type your question naturally and it responds.
+
+**2. It only explains. Never executes.**  
+Tools like Billy, Shell Sage or AI-Terminal-X can run commands on your behalf. TuxAide deliberately does not. It explains, shows examples, and lets *you* decide what to run. Safer for beginners.
+
+**3. 100% local by default.**  
+Not as an option — as the only mode. No API key. No account. No cloud. Nothing leaves your machine, ever. Most competitors default to cloud and offer local as an optional configuration.
+
+**4. Built for beginners, not developers.**  
+Every other tool targets experienced users or developers. TuxAide targets people who are still learning Linux — junior sysadmins, students, anyone who keeps forgetting flags and commands.
+
+**5. One command installs everything.**  
+Ollama, the AI model, the shell hook — all in one `curl | bash`. No brew taps, no cargo, no pipx, no manual steps.
 
 ---
 
@@ -75,19 +98,7 @@ cómo ver el espacio en disco           # → Spanish
 wie zeige ich offene Ports             # → German
 ```
 
----
-
-## What the installer does
-
-| Step | Action |
-|---|---|
-| 1 | Detects your distro, architecture and RAM |
-| 2 | Installs dependencies (python3, curl, unzip) |
-| 3 | Installs Ollama (local AI engine) |
-| 4 | Registers Ollama as a systemd service (starts on boot) |
-| 5 | Downloads the AI model best suited to your hardware |
-| 6 | Installs the TuxAide agent |
-| 7 | Adds the hook to your ~/.bashrc or ~/.zshrc |
+Most competing tools assume English only. TuxAide does not.
 
 ---
 
@@ -102,6 +113,7 @@ how to configure cron to run at 3am
 how to see who is connected via SSH
 how to create a sudo user on Ubuntu
 what does the -z flag do in grep
+what is a symlink and how do I create one
 
 # Explicit mode also works:
 tuxaide how to check disk usage by folder
@@ -135,11 +147,7 @@ The installer picks the **best model for Linux knowledge**, not just the smalles
 
 `qwen2.5-coder:7b` covers: bash/zsh scripting · systemd · networking (ip, ss, iptables, SSH) · package managers (apt, dnf, pacman) · text tools (grep, awk, sed, jq) · Docker · Git · and more.
 
-To switch model at any time:
-```bash
-ollama pull mistral
-tuxaide model mistral
-```
+> **Note:** AI models can make mistakes. TuxAide is advisory only — always review a command before running it.
 
 ---
 
@@ -168,7 +176,22 @@ tcpdump: listening on any, link-type LINUX_SLL2
 
 Not a single packet left the server. You can reproduce this test yourself at any time.
 
-**Ideal for:** financial services · healthcare · legal · government · any environment with sensitive data.
+**Ideal for:** financial services · healthcare · legal · government · education · any environment with sensitive data.
+
+---
+
+## Comparison with alternatives
+
+| | TuxAide | Lexido | Billy | Shell Sage | ask.sh |
+|---|---|---|---|---|---|
+| 100% local by default | ✅ | ❌ cloud | ✅ | ✅ | partial |
+| No API key required | ✅ | ❌ | ✅ | ✅ | ❌ |
+| Auto-trigger (no keyword) | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Explain only — never executes | ✅ | ✅ | ❌ executes | ❌ executes | ❌ executes |
+| One-line install (curl) | ✅ | ❌ | ✅ | ❌ | ❌ |
+| Multilingual | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Targets beginners | ✅ | ❌ | ❌ | ❌ | ❌ |
+| GDPR / nDSG safe | ✅ | ❌ | partial | partial | ❌ |
 
 ---
 
@@ -189,21 +212,6 @@ Not a single packet left the server. You can reproduce this test yourself at any
 
 ---
 
-## Why TuxAide vs alternatives
-
-| | TuxAide | ShellGPT | Warp | GitHub Copilot CLI |
-|---|---|---|---|---|
-| 100% local | ✅ | ❌ | ❌ | ❌ |
-| No API key | ✅ | ❌ | ❌ | ❌ |
-| Free forever | ✅ | ❌ | ❌ | ❌ |
-| Works offline | ✅ | ❌ | ❌ | ❌ |
-| Transparent hook | ✅ | ❌ | ❌ | ❌ |
-| One-line install | ✅ | ❌ | ❌ | ❌ |
-| Multilingual | ✅ | partial | ❌ | ❌ |
-| GDPR / nDSG safe | ✅ | ❌ | ❌ | ❌ |
-
----
-
 ## Uninstall
 
 ```bash
@@ -220,6 +228,16 @@ rm -rf ~/.ollama
 
 ---
 
+## Contributing
+
+TuxAide is a community project, not a finished product. Issues, ideas and pull requests are welcome.
+
+If you speak a language not yet supported, open an issue — multilingual support is a priority.
+
+[github.com/deltaxmodules/tuxaide](https://github.com/deltaxmodules/tuxaide)
+
+---
+
 ## Repository
 
 ```
@@ -232,12 +250,6 @@ tuxaide/
 
 ---
 
-## Contributing
-
-Issues, pull requests and feedback welcome at [github.com/deltaxmodules/tuxaide](https://github.com/deltaxmodules/tuxaide).
-
----
-
 <div align="center">
-<sub>🐧 Built with ❤️ · Powered by <a href="https://ollama.com">Ollama</a> · Named after Tux, the Linux mascot · 100% local · 100% private</sub>
+<sub>🐧 Named after Tux, the Linux mascot · Powered by <a href="https://ollama.com">Ollama</a> · 100% local · 100% private · Built for beginners</sub>
 </div>
