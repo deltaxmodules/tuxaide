@@ -598,7 +598,10 @@ def ask_ollama(q, c, passages=None):
         "model": c["model"],
         "messages": [
             {"role": "system", "content": build_prompt(lang, passages)},
-            {"role": "user",   "content": q}
+            {"role": "user",   "content": q + (
+                "\n\n[Important: end your answer with exactly: Source: <man page name>]"
+                if passages else ""
+            )}
         ],
         "options": {"temperature": c.get("temperature", 0.1),
                     "num_predict": c.get("max_tokens", 600),
@@ -968,19 +971,14 @@ if [[ -n "${ZSH_VERSION:-}" ]]; then
     autoload -Uz add-zsh-hook 2>/dev/null
     add-zsh-hook preexec _lg_preexec 2>/dev/null
 
-    # command_not_found_handler: suppress zsh "command not found" error
-    # for words that are actually questions (already answered by preexec)
+    # command_not_found_handler: suppress "command not found" for questions
     command_not_found_handler() {
         local cmd="$1"
-        # Get full command from history
-        local full_cmd
-        full_cmd=$(fc -ln -1 2>/dev/null | sed 's/^[[:space:]]*//')
-        local question="${full_cmd:-$*}"
-        # If it was a question, stay silent (already answered by preexec)
-        if "$_LG" --check "$question" 2>/dev/null; then
-            return 0
-        fi
-        # Not a question — show normal error
+        # If it looks like a question word, stay silent (preexec already answered)
+        case "$cmd" in
+            how|why|what|where|when|which|who|como|porque|qual|onde|             comment|pourquoi|quel|cómo|qué|wie|warum|was)
+                return 0 ;;
+        esac
         echo "zsh: command not found: $cmd" >&2
         return 127
     }
