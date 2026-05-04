@@ -458,7 +458,7 @@ fetch_component() {
         return 0
     fi
 
-    local repo="${TUXAIDE_REPO:-tuxaide/tuxaide}"
+    local repo="${TUXAIDE_REPO:-deltaxmodules/tuxaide}"
     local ref="${TUXAIDE_REF:-main}"
     local base_url="${TUXAIDE_RAW_BASE:-https://raw.githubusercontent.com/${repo}/${ref}}"
     curl -fsSL "${base_url}/${name}" -o "$dest" || return 1
