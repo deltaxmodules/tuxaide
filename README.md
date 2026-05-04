@@ -1,185 +1,98 @@
-# 🐧 TuxAide v2 — RAG Edition
+# 🐧 TuxAide
 
-> **Local AI assistant for your Linux terminal — now with man page knowledge base.**  
-> Answers grounded in your system's own documentation. No hallucinations. No cloud. No API keys.
+> **Local AI assistant for your Linux terminal.**  
+> Designed for new Linux users — no remembering flags, no web searches, just ask your terminal.
 
 <div align="center">
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Ollama](https://img.shields.io/badge/Powered%20by-Ollama-blue)](https://ollama.com)
-[![RAG](https://img.shields.io/badge/RAG-man%20pages-orange)](#rag-mode)
+[![Shell: bash/zsh](https://img.shields.io/badge/Shell-bash%20%7C%20zsh-lightgrey)](#compatibility)
 [![Privacy: 100% local](https://img.shields.io/badge/Privacy-100%25%20local-brightgreen)](#data-sovereignty)
 
 </div>
 
 ---
 
-## What's new in v2
-
-TuxAide v1 used a general-purpose LLM. It worked well, but could occasionally produce incorrect command flags — AI models sometimes generate plausible-sounding but wrong information.
-
-TuxAide v2 adds **RAG (Retrieval-Augmented Generation)**: before answering, the agent searches a local vector database built from the man pages installed on your system. It injects the most relevant passages into the prompt, grounding every answer in verified documentation.
-
-```
-v1:  Question → LLM → Answer
-
-v2:  Question → Embedding → ChromaDB (your man pages)
-                                    ↓
-                             Relevant passages
-                                    ↓
-                      Question + Context → LLM → Answer
-                                                  + Source citation
-```
-
----
-
 ## Install
 
+One command. That's it.
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/deltaxmodules/tuxaide/main/setup_v2.sh | bash
+curl -fsSL https://raw.githubusercontent.com/deltaxmodules/tuxaide/main/setup.sh | bash
 ```
 
-The installer will:
-1. Diagnose your system (RAM, disk, GPU) and show a summary
-2. Ask for confirmation before proceeding
-3. Ask if you want RAG mode installed
-4. Handle everything else automatically
+The installer handles everything automatically — Ollama, the AI model, the shell hook. When it finishes, run:
 
-After install, run once:
 ```bash
-source ~/.bashrc    # Linux
-source ~/.zshrc     # macOS
+# Linux (bash)
+source ~/.bashrc
+
+# macOS (zsh — default on Mac)
+source ~/.zshrc
 ```
 
----
-
-## System diagnosis
-
-Before installing, the installer shows a full diagnosis:
-
-```
-┌─────────────────────────────────────────────────────┐
-│  System Diagnosis Summary                           │
-├─────────────────────────────────────────────────────┤
-│  RAM:                     16 GB                     │
-│  Free disk:               45 GB available           │
-│  GPU:                     NVIDIA RTX 3060           │
-│  AI model:                qwen2.5-coder:7b (4.7 GB) │
-├─────────────────────────────────────────────────────┤
-│  ✓ TuxAide v1 (LLM mode)    READY                   │
-│  ✓ TuxAide v2 (RAG mode)    AVAILABLE               │
-└─────────────────────────────────────────────────────┘
-
-? Proceed with installation? [Y/n]
-? Install RAG mode? (recommended) [Y/n]
-```
+Then just start typing questions.
 
 ---
 
 ## How it works
 
-Write your Linux question directly in the terminal:
+Write your Linux question directly in the terminal, as if it were a command:
 
-```bash
-# bash — type directly (any length)
-$ how do I configure nginx as a reverse proxy
-
-# zsh — use tux for longer questions
-$ tux how do I configure nginx as a reverse proxy
+```
+$ how do I list hidden files sorted by size
 ```
 
-TuxAide answers based on the nginx man page installed on your system:
+TuxAide intercepts it silently and answers inline:
 
 ```
 ╭──────────────────────────────────────────────────────────────╮
-╞═ 🐧 TuxAide (Ollama · qwen2.5-coder:7b · RAG) ═╡
+╞═ 🐧 TuxAide (Ollama · qwen2.5-coder:7b) ═╡
 
-  To configure nginx as a reverse proxy, add a location block
-  to your server configuration:
+  To list hidden files sorted by size:
 
-  ┄ nginx ┄
-  location /api/ {
-      proxy_pass http://localhost:3000/;
-      proxy_set_header Host $host;
-      proxy_set_header X-Real-IP $remote_addr;
-  }
+  ┄ shell ┄
+  ls -laSh
   ┄┄┄┄┄┄┄
 
-  Reload the configuration with: sudo nginx -s reload
-
-  Source: man nginx(8)   ← always cited when using RAG mode
+  -a shows hidden files, -S sorts by size (largest first),
+  -h shows human-readable sizes (KB, MB, GB).
+  To reverse: ls -laShr
 
   ⚠ Always verify commands before running them.
 
 ╰──────────────────────────────────────────────────────────────╯
 ```
 
-The `Source: man nginx(8)` citation tells you exactly where the information came from.
-
-> **zsh users:** TuxAide answers the question and suppresses the "command not found" error — no noise in the terminal.
+Normal commands (`ls -la`, `git commit`, `sudo apt update`) pass through untouched. **Zero interference.**
 
 ---
 
-## RAG mode
+## What makes TuxAide different
 
-RAG mode indexes the man pages installed on your system. This means:
+Most AI terminal tools exist. Here is why TuxAide is not just another one:
 
-- **Answers are specific to your system** — if you have nginx 1.24, answers come from the nginx 1.24 man page
-- **Drastically reduced hallucinations** — answers are grounded in real documentation
-- **Source citations** — every answer cites the man page it used
-- **Automatic fallback** — if RAG fails for any reason, TuxAide falls back to LLM mode silently
+**1. No trigger word needed.**  
+Every other tool requires you to type `ask`, `hey`, `lumo`, `lexido` or similar before your question. TuxAide hooks into the shell's `command_not_found` handler — you just type your question naturally and it responds.
 
-### Knowledge base
+**2. It only explains. Never executes.**  
+Tools like Billy, Shell Sage or AI-Terminal-X can run commands on your behalf. TuxAide deliberately does not. It explains, shows examples, and lets *you* decide what to run. Safer for beginners.
 
-The indexer covers the **top 100 most useful Linux commands** by default:
+**3. 100% local by default.**  
+Not as an option — as the only mode. No API key. No account. No cloud. Nothing leaves your machine, ever. Most competitors default to cloud and offer local as an optional configuration.
 
-`ls`, `grep`, `find`, `ssh`, `curl`, `git`, `systemctl`, `journalctl`, `nginx`, `docker`, `apt`, `chmod`, `cron`, `ps`, `top`, `df`, `du`, `tar`, `sed`, `awk`, and many more.
+**4. Built for beginners, not developers.**  
+Every other tool targets experienced users or developers. TuxAide targets people who are still learning Linux — junior sysadmins, students, anyone who keeps forgetting flags and commands.
 
-### After system updates
-
-When you update packages (`apt upgrade`, `dnf update`), man pages may change. Re-index to keep the knowledge base current:
-
-```bash
-tuxaide reindex          # re-index all man pages
-tuxaide index nginx      # index a specific command
-```
-
----
-
-## Mode control
-
-```bash
-tuxaide mode rag    # use man page knowledge base (v2)
-tuxaide mode llm    # use general LLM only (v1 behaviour)
-tuxaide mode        # show current mode
-tuxaide status      # show status and current mode
-```
-
----
-
-## zsh — automatic vs explicit mode
-
-In **zsh**, the automatic hook works best for short questions (2-4 words). For longer questions, use the explicit mode:
-
-```bash
-# Short questions — automatic hook works perfectly
-how do I list files
-comment voir espace disque
-como ver portas abertas
-
-# Longer questions — use explicit mode
-tux what is the difference between hard and soft links
-tuxaide how do I configure nginx as a reverse proxy
-tux comment configurer un cron pour 3h du matin
-```
-
-In **bash**, both short and long questions work automatically without any prefix.
+**5. One command installs everything.**  
+Ollama, the AI model, the shell hook — all in one `curl | bash`. No brew taps, no cargo, no pipx, no manual steps.
 
 ---
 
 ## Any language
 
-TuxAide detects your language automatically:
+TuxAide detects your language automatically and always replies in the same language you used:
 
 ```bash
 how do I check open ports              # → English
@@ -189,103 +102,144 @@ cómo ver el espacio en disco           # → Spanish
 wie zeige ich offene Ports             # → German
 ```
 
+Most competing tools assume English only. TuxAide does not.
+
 ---
 
-## All controls
+## Examples
+
+```bash
+# Just type — no special prefix needed:
+how do I backup with rsync
+why is my process consuming so much RAM
+what is the difference between chmod and chown
+how to configure cron to run at 3am
+how to see who is connected via SSH
+how to create a sudo user on Ubuntu
+what does the -z flag do in grep
+what is a symlink and how do I create one
+
+# Explicit mode also works:
+tuxaide how to check disk usage by folder
+tux what is the difference between hard and soft links
+```
+
+---
+
+## Controls
 
 ```bash
 tuxaide on                  # enable automatic hook
-tuxaide off                 # disable temporarily
-tuxaide status              # show status and mode
-tuxaide mode [llm|rag]      # switch knowledge mode
+tuxaide off                 # disable (terminal works normally)
+tuxaide status              # show current status
 tuxaide model llama3.2      # switch Ollama model
-tuxaide index <cmd>         # index a specific man page
-tuxaide reindex             # re-index all man pages
 
 tuxaide-uninstall           # remove completely
 ```
 
 ---
 
-## Hardware requirements
+## AI Model
 
-| | v1 (LLM only) | v2 (RAG + LLM) |
-|---|---|---|
-| Minimum RAM | 5 GB | 8 GB |
-| Recommended RAM | 8 GB | 16 GB |
-| Disk space | ~5 GB | ~8 GB |
-| GPU | Optional | Optional (faster) |
-| Install time | ~10 min | ~25 min |
-| Response time (CPU) | 4–10s | 5–12s |
-| Response time (GPU / Metal) | ~1–2s | ~2–3s |
+The installer picks the **best model for Linux knowledge**, not just the smallest:
 
-> **macOS:** Ollama uses Apple Metal automatically when available — no configuration needed.
+| Available RAM | Model | Size | Why |
+|---|---|---|---|
+| ≥ 8 GB | `qwen2.5-coder:7b` | 4.4 GB | Trained on code, man pages and system commands — best for this agent |
+| 5–8 GB | `qwen2.5:3b` | 1.9 GB | Good Linux knowledge, lower RAM footprint |
+| < 5 GB | `qwen2.5:3b` | 1.9 GB | Best available lightweight option |
 
-### AI models
+`qwen2.5-coder:7b` covers: bash/zsh scripting · systemd · networking (ip, ss, iptables, SSH) · package managers (apt, dnf, pacman) · text tools (grep, awk, sed, jq) · Docker · Git · and more.
 
-| Available RAM | LLM Model | Size |
-|---|---|---|
-| ≥ 8 GB | `qwen2.5-coder:7b` | 4.7 GB |
-| 5–8 GB | `qwen2.5:3b` | 1.9 GB |
-
-**RAG embedding model:** `nomic-embed-text` (274 MB) — always local, always offline.
+> **Note:** AI models can make mistakes. TuxAide is advisory only — always review a command before running it.
 
 ---
 
 ## 🔒 Data Sovereignty
 
-Everything runs locally. Nothing ever leaves your machine.
+TuxAide was designed from the ground up for environments where **data cannot leave the server.**
 
-- All AI processing via Ollama at `localhost:11434`
-- Man page embeddings stored in `~/.config/tuxaide/vectordb`
-- No API keys. No accounts. No telemetry. No cloud.
-- Works fully **air-gapped** after installation
-- Compatible with **GDPR**, **NIS2** and **Swiss nDSG**
+- All AI processing runs locally via Ollama — no external calls, ever
+- No data is sent to any server, cloud provider or third party
+- No API keys. No accounts. No usage tracking.
+- Works fully **air-gapped** — no internet required after installation
+- Compatible with **GDPR**, **NIS2** and **Swiss nDSG** requirements
 
-**Verified with tcpdump: 0 packets captured** during a full session.
+**Independently verified** — zero external traffic:
+
+```
+$ sudo tcpdump -i any host ollama.com &
+$ tuxaide how do I list open ports
+
+tcpdump: listening on any, link-type LINUX_SLL2
+[... TuxAide answers fully ...]
+^C
+0 packets captured
+0 packets received by filter
+```
+
+Not a single packet left the server. You can reproduce this test yourself at any time.
+
+**Ideal for:** financial services · healthcare · legal · government · education · any environment with sensitive data.
+
+---
+
+## Comparison with alternatives
+
+| | TuxAide | Lexido | Billy | Shell Sage | ask.sh |
+|---|---|---|---|---|---|
+| 100% local by default | ✅ | ❌ cloud | ✅ | ✅ | partial |
+| No API key required | ✅ | ❌ | ✅ | ✅ | ❌ |
+| Auto-trigger (no keyword) | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Explain only — never executes | ✅ | ✅ | ❌ executes | ❌ executes | ❌ executes |
+| One-line install (curl) | ✅ | ❌ | ✅ | ❌ | ❌ |
+| Multilingual | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Targets beginners | ✅ | ❌ | ❌ | ❌ | ❌ |
+| GDPR / nDSG safe | ✅ | ❌ | partial | partial | ❌ |
 
 ---
 
 ## Compatibility
 
-| Platform | v1 | v2 (RAG) |
-|---|---|---|
-| Ubuntu / Debian | ✅ | ✅ |
-| Fedora / RHEL / CentOS | ✅ | ✅ |
-| Arch Linux | ✅ | ✅ |
-| openSUSE | ✅ | ✅ |
-| Raspberry Pi (arm64) | ✅ | ⚠ RAM limited |
-| ARM servers (AWS Graviton) | ✅ | ✅ |
-| macOS (Intel + Apple Silicon) | ✅ | ✅ |
+| Platform | Support |
+|---|---|
+| Ubuntu / Debian | ✅ Full |
+| Fedora / RHEL / CentOS | ✅ Full |
+| Arch Linux | ✅ Full |
+| openSUSE | ✅ Full |
+| Raspberry Pi (arm64) | ✅ Full |
+| ARM servers (AWS Graviton, Oracle ARM) | ✅ Full |
+| macOS (Intel + Apple Silicon) | ✅ Full |
+
+**Shells:** bash and zsh.  
+**Minimum RAM:** 5 GB. Recommended: 8 GB+.
 
 ---
 
 ## 🍎 macOS notes
 
-macOS uses **zsh** by default. After installing, run:
+macOS uses **zsh** by default (not bash). After installing, always run:
 
 ```bash
-source ~/.zshrc    # not ~/.bashrc
+source ~/.zshrc
 ```
 
-If TuxAide does not respond, add the hook manually:
+Running `source ~/.bashrc` on a Mac will cause an error — use `.zshrc` instead.
+
+If TuxAide does not respond after sourcing, add the hook manually:
 
 ```bash
 echo 'source "$HOME/.config/tuxaide/hook.sh"  # TuxAide' >> ~/.zshrc
 source ~/.zshrc
 ```
 
----
-
-## Upgrading from v1
-
-If you already have TuxAide v1 installed:
+Then verify it is working:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/deltaxmodules/tuxaide/main/setup_v2.sh | bash
+tuxaide status
 ```
 
-The installer detects the existing installation and only adds the RAG components. Your current configuration is preserved.
+Also note: on macOS, Ollama is installed as a desktop app. If the automatic installer fails, download it manually from [ollama.com](https://ollama.com), open the app once, and then re-run the TuxAide installer.
 
 ---
 
@@ -295,13 +249,28 @@ The installer detects the existing installation and only adds the RAG components
 tuxaide-uninstall
 ```
 
-Removes the agent, hook, config and vector database. Ollama and models are kept.
+Removes the agent, the hook and all config files. Ollama and models are kept (remove manually if needed):
+
+```bash
+# Linux
+sudo systemctl stop ollama
+sudo rm $(which ollama)
+rm -rf ~/.ollama
+
+# macOS
+killall ollama 2>/dev/null || true
+rm -rf /Applications/Ollama.app
+sudo rm -f /usr/local/bin/ollama
+rm -rf ~/.ollama
+```
 
 ---
 
 ## Contributing
 
-TuxAide is a community project. Issues, ideas and pull requests are welcome.
+TuxAide is a community project, not a finished product. Issues, ideas and pull requests are welcome.
+
+If you speak a language not yet supported, open an issue — multilingual support is a priority.
 
 [github.com/deltaxmodules/tuxaide](https://github.com/deltaxmodules/tuxaide)
 
@@ -311,10 +280,11 @@ TuxAide is a community project. Issues, ideas and pull requests are welcome.
 
 ```
 tuxaide/
-├── setup.sh       ← v1 installer (LLM only)
-├── setup_v2.sh    ← v2 installer (LLM + optional RAG)
+├── setup.sh     ← complete self-contained installer
 └── README.md
 ```
+
+`setup.sh` contains everything: installer, Python agent, shell hook and uninstaller. One file. Zero external dependencies beyond `python3`, `curl` and `bash`.
 
 ---
 
