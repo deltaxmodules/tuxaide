@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # ══════════════════════════════════════════════════════════════════════
 #  TuxAide v2.1 — Complete Installer with Smart RAG
-#  https://github.com/tuxaide/tuxaide
+#  https://github.com/deltaxmodules/tuxaide
 #
 #  One-liner install:
-#    curl -sSL https://tuxaide.sh/install | bash
+#    curl -fsSL https://raw.githubusercontent.com/deltaxmodules/tuxaide/main/setup.sh | bash
 #
 #  What it does:
 #    1.  Detects distro, architecture, RAM and GPU

@@ -33,7 +33,7 @@ No browser. No copy/paste. No remembering flags.
 ## 🚀 Install
 
 ```bash
-curl -sSL https://tuxaide.sh/install | bash
+curl -fsSL https://raw.githubusercontent.com/deltaxmodules/tuxaide/main/setup.sh | bash
 ```
 
 Then:
@@ -205,6 +205,6 @@ RAM: 5GB minimum (8GB recommended)
 
 Open source project — contributions welcome.
 
-👉 https://github.com/tuxaide/tuxaide
+👉 https://github.com/deltaxmodules/tuxaide
 
 ---
