@@ -2,12 +2,12 @@
 set -euo pipefail
 
 # Backward-compatibility entrypoint.
-# Preferred public installer: curl -fsSL https://raw.githubusercontent.com/deltaxmodules/tuxaide/main/setup.sh | bash
+# Preferred public installer: curl -fsSL https://raw.githubusercontent.com/deltaxmodules/tuxaide/main/install.sh | bash
 
 TMP_INSTALL="$(mktemp)"
 trap 'rm -f "$TMP_INSTALL"' EXIT
 
-if curl -fsSL "https://raw.githubusercontent.com/deltaxmodules/tuxaide/main/setup.sh" -o "$TMP_INSTALL"; then
+if curl -fsSL "https://raw.githubusercontent.com/deltaxmodules/tuxaide/main/install.sh" -o "$TMP_INSTALL"; then
     bash "$TMP_INSTALL"
 else
     echo "Failed to download install.sh from GitHub." >&2
