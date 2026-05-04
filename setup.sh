@@ -438,7 +438,7 @@ install_agent() {
     cat > "${BIN}/tuxaide" << 'PYEOF'
 #!/usr/bin/env python3
 """TuxAide v2 — Local AI assistant for Linux terminal with optional RAG."""
-import sys, os, re, json, urllib.request, urllib.error, textwrap, shutil
+import sys, os, re, json, urllib.request, urllib.error, textwrap, shutil, threading, time, itertools
 
 CFG_FILE = os.path.expanduser("~/.config/tuxaide/config.json")
 DEFAULTS = {
@@ -468,6 +468,23 @@ def save_cfg(updates):
 class C:
     Z="\033[0m"; B="\033[1m"; D="\033[2m"
     G="\033[32m"; Y="\033[36m"; R="\033[33m"; O="\033[31m"
+
+class Spinner:
+    _frames = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
+    def __init__(self, msg="Thinking"):
+        self._msg = msg
+        self._stop = threading.Event()
+        self._t = threading.Thread(target=self._run, daemon=True)
+    def _run(self):
+        for f in itertools.cycle(self._frames):
+            if self._stop.is_set(): break
+            sys.stderr.write(f"\r  {f}  {self._msg}...")
+            sys.stderr.flush()
+            time.sleep(0.09)
+        sys.stderr.write("\r" + " " * (len(self._msg) + 10) + "\r")
+        sys.stderr.flush()
+    def start(self): self._t.start(); return self
+    def stop(self): self._stop.set(); self._t.join()
 
 # ── Question detection ────────────────────────────────────────────────
 KW_PT = ['como faço','como usar','como instalar','como ver','como listar',
@@ -714,13 +731,14 @@ def main():
         print(f"{C.D}  Try: sudo systemctl start ollama{C.Z}\n")
         sys.exit(0)
 
-    # RAG or LLM
+    spinner = Spinner().start()
     current_mode = c.get("mode", "llm")
     passages = []
     if current_mode == "rag" and rag_available():
         passages = retrieve(q, c)
 
     answer = ask_ollama(q, c, passages if passages else None)
+    spinner.stop()
     actual_mode = "rag" if passages else "llm"
     print(fmt(answer, c, actual_mode))
 
