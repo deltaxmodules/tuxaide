@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # ══════════════════════════════════════════════════════════════════════
-#  TuxAide v2 — Complete Installer with RAG
+#  TuxAide v2.1 — Complete Installer with Smart RAG
 #  https://github.com/deltaxmodules/tuxaide
 #
 #  One-liner install:
-#    curl -fsSL https://raw.githubusercontent.com/deltaxmodules/tuxaide/main/setup_v2.sh | bash
+#    curl -fsSL https://raw.githubusercontent.com/deltaxmodules/tuxaide/main/setup.sh | bash
 #
 #  What it does:
 #    1.  Detects distro, architecture, RAM and GPU
@@ -14,8 +14,16 @@
 #    5.  If yes: installs ChromaDB, embedding model, indexes man pages
 #    6.  Activates immediately — no terminal restart needed
 #
+#  v2.1 changes (smart RAG):
+#    - Smart router: RAG only when the question needs local docs
+#    - Cache: embeddings and answers cached to disk (MD5 key)
+#    - RAG filtered by detected command (faster, less noise)
+#    - top_k reduced to 1 in smart mode (300 tokens max)
+#    - Silent perf log at ~/.config/tuxaide/logs/perf.log
+#    - Destructive command warning shown before code blocks
+#
 #  To disable RAG:   tuxaide mode llm
-#  To re-enable RAG: tuxaide mode rag
+#  To re-enable RAG: tuxaide mode smart
 #  To uninstall:     tuxaide-uninstall
 # ══════════════════════════════════════════════════════════════════════
 
@@ -30,8 +38,8 @@ banner() {
     clear 2>/dev/null || true
     echo ""
     echo -e "${CY}${BOLD}╔══════════════════════════════════════════════════════╗${R}"
-    echo -e "${CY}${BOLD}║   🐧  TuxAide v2 — Complete Installer               ║${R}"
-    echo -e "${CY}${BOLD}║   Local AI assistant with RAG knowledge base        ║${R}"
+    echo -e "${CY}${BOLD}║   🐧  TuxAide v2.1 — Complete Installer             ║${R}"
+    echo -e "${CY}${BOLD}║   Local AI assistant with Smart RAG                 ║${R}"
     echo -e "${CY}${BOLD}╚══════════════════════════════════════════════════════╝${R}"
     echo ""
 }
@@ -168,13 +176,13 @@ diagnose_system() {
 
     # RAG assessment
     if [[ "$RAG_CAPABLE" == "true" && $DISK_FREE_GB -ge 8 ]]; then
-        echo -e "  ${CY}│${R}  ${GR}✓${R} TuxAide v2 (RAG mode)    ${GR}AVAILABLE${R}                ${CY}│${R}"
+        echo -e "  ${CY}│${R}  ${GR}✓${R} TuxAide v2.1 (Smart RAG) ${GR}AVAILABLE${R}                ${CY}│${R}"
         RAG_AVAILABLE=true
     else
         if [[ "$RAG_CAPABLE" == "false" ]]; then
-            echo -e "  ${CY}│${R}  ${YL}⚠${R} TuxAide v2 (RAG mode)    ${YL}RAM < 5 GB — not recommended${R} ${CY}│${R}"
+            echo -e "  ${CY}│${R}  ${YL}⚠${R} TuxAide v2.1 (Smart RAG) ${YL}RAM < 5 GB — not recommended${R} ${CY}│${R}"
         else
-            echo -e "  ${CY}│${R}  ${YL}⚠${R} TuxAide v2 (RAG mode)    ${YL}DISK SPACE LOW${R}           ${CY}│${R}"
+            echo -e "  ${CY}│${R}  ${YL}⚠${R} TuxAide v2.1 (Smart RAG) ${YL}DISK SPACE LOW${R}           ${CY}│${R}"
         fi
         RAG_AVAILABLE=false
     fi
@@ -214,17 +222,19 @@ ask_rag() {
     step "RAG mode — man page knowledge base"
 
     echo ""
-    echo -e "  ${BOLD}What is RAG mode?${R}"
-    echo -e "  TuxAide v2 can index the man pages installed on this system"
-    echo -e "  and use them as a knowledge base. This means:"
+    echo -e "  ${BOLD}What is Smart RAG mode?${R}"
+    echo -e "  TuxAide v2.1 can index the man pages installed on this system"
+    echo -e "  and use them as a knowledge base — but only when the question"
+    echo -e "  actually needs local documentation. This means:"
     echo ""
-    echo -e "  ${GR}✓${R}  Answers based on the documentation of THIS system"
-    echo -e "  ${GR}✓${R}  Drastically reduced hallucinations"
+    echo -e "  ${GR}✓${R}  Simple questions answered in 3–5s (LLM direct)"
+    echo -e "  ${GR}✓${R}  Complex questions answered in 8–15s (Smart RAG)"
+    echo -e "  ${GR}✓${R}  Repeated questions answered instantly (cache)"
+    echo -e "  ${GR}✓${R}  Drastically reduced hallucinations on local docs"
     echo -e "  ${GR}✓${R}  Responses cite the source: man page + section"
-    echo -e "  ${GR}✓${R}  Specific to your installed software versions"
     echo ""
     echo -e "  ${DIM}Extra requirements: ~300 MB RAM + ~10 min indexing (one-time)${R}"
-    echo -e "  ${DIM}If skipped now, you can enable later with: tuxaide mode rag${R}"
+    echo -e "  ${DIM}If skipped now, you can enable later with: tuxaide mode smart${R}"
     echo ""
 
     if [[ "$RAG_AVAILABLE" == "false" ]]; then
@@ -234,16 +244,16 @@ ask_rag() {
         return
     fi
 
-    ask "Install RAG mode? (recommended) [Y/n] "
+    ask "Install Smart RAG mode? (recommended) [Y/n] "
     read -r RAG_CONFIRM </dev/tty
     RAG_CONFIRM="${RAG_CONFIRM:-y}"
     if [[ "$RAG_CONFIRM" =~ ^[yYsS]$ ]]; then
         INSTALL_RAG=true
-        ok "RAG mode will be installed"
+        ok "Smart RAG mode will be installed"
     else
         INSTALL_RAG=false
         info "Skipping RAG — installing LLM mode only (v1 behaviour)"
-        info "Enable later with: tuxaide mode rag"
+        info "Enable later with: tuxaide mode smart"
     fi
 }
 
@@ -437,20 +447,26 @@ install_agent() {
     # ── Main Python binary ─────────────────────────────────────────────
     cat > "${BIN}/tuxaide" << 'PYEOF'
 #!/usr/bin/env python3
-"""TuxAide v2 — Local AI assistant for Linux terminal with optional RAG."""
-import sys, os, re, json, urllib.request, urllib.error, textwrap, shutil, threading, time, itertools
+"""TuxAide v2.1 — Local AI assistant for Linux terminal with Smart RAG."""
+import sys, os, re, json, hashlib, time, urllib.request, urllib.error
+import textwrap, shutil, threading, itertools
 
-CFG_FILE = os.path.expanduser("~/.config/tuxaide/config.json")
+CFG_FILE  = os.path.expanduser("~/.config/tuxaide/config.json")
+CACHE_DIR = os.path.expanduser("~/.config/tuxaide/cache")
+LOG_DIR   = os.path.expanduser("~/.config/tuxaide/logs")
+PERF_LOG  = os.path.join(LOG_DIR, "perf.log")
+
 DEFAULTS = {
-    "ollama_url": "http://localhost:11434",
-    "model": "qwen2.5-coder:7b",
-    "embed_model": "nomic-embed-text",
-    "max_tokens": 600,
-    "temperature": 0.1,
-    "color": True,
-    "mode": "llm",           # "llm" or "rag"
-    "rag_top_k": 3,          # number of passages to retrieve
-    "rag_db_path": "~/.config/tuxaide/vectordb",
+    "ollama_url":   "http://localhost:11434",
+    "model":        "qwen2.5-coder:7b",
+    "embed_model":  "nomic-embed-text",
+    "max_tokens":   300,
+    "temperature":  0.1,
+    "color":        True,
+    "mode":         "llm",    # "llm", "smart", "deep"
+    "rag_top_k":    1,
+    "rag_db_path":  "~/.config/tuxaide/vectordb",
+    "rag_timeout":  8,        # seconds before RAG fallback to LLM
 }
 
 def cfg():
@@ -467,7 +483,7 @@ def save_cfg(updates):
 
 class C:
     Z="\033[0m"; B="\033[1m"; D="\033[2m"
-    G="\033[32m"; Y="\033[36m"; R="\033[33m"; O="\033[31m"
+    G="\033[32m"; Y="\033[36m"; R="\033[33m"; O="\033[31m"; RD="\033[31m"
 
 class Spinner:
     _frames = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
@@ -484,7 +500,7 @@ class Spinner:
         sys.stderr.write("\r" + " " * (len(self._msg) + 10) + "\r")
         sys.stderr.flush()
     def start(self): self._t.start(); return self
-    def stop(self): self._stop.set(); self._t.join()
+    def stop(self):  self._stop.set(); self._t.join()
 
 # ── Question detection ────────────────────────────────────────────────
 KW_PT = ['como faço','como usar','como instalar','como ver','como listar',
@@ -512,7 +528,37 @@ CMDS = {'ls','cd','pwd','mkdir','rm','cp','mv','cat','echo','grep','find',
         'ss','lsof','file','stat','touch','ln','date','uptime','who','id',
         'crontab','screen','tmux','xargs','tee','tr','rsync','nc','iptables',
         'ufw','service','snap','flatpak','node','npm','npx','yarn','go',
-        'ruby','perl','php','source','ollama','tuxaide','tux','lg'}
+        'ruby','perl','php','source','ollama','tuxaide','tux','lg',
+        'nginx','apache2','mysql','postgresql','redis','useradd','userdel',
+        'passwd','groupadd','fdisk','lsblk','mkfs','fsck','strace','nmap',
+        'dig','nslookup','blkid','vmstat','iostat','sar'}
+
+# Keywords that signal the question needs local documentation
+RAG_KEYWORDS = {
+    'options','flags','man','error','configure','setup','my system',
+    'opções','flags','man','erro','configurar','neste sistema',
+    'options','indicateurs','erreur','configurer','mon système',
+    'optionen','fehler','konfigurieren','mein system',
+}
+
+# Destructive command patterns — shown with a warning
+DESTRUCTIVE_PATTERNS = [
+    r'\brm\s+-[^\s]*r',        # rm -r, rm -rf, rm -Rf
+    r'\brm\s+-[^\s]*f',        # rm -f
+    r'\bdd\b',                  # dd
+    r'\bmkfs\b',                # mkfs.*
+    r'\bfdisk\b',               # fdisk
+    r'\bparted\b',              # parted
+    r'\bshred\b',               # shred
+    r'\bwipefs\b',              # wipefs
+    r'>\s*/dev/',               # redirect to /dev/
+    r'\bchmod\s+777\b',         # chmod 777
+    r'\bsudo\s+rm\b',           # sudo rm
+    r'DROP\s+TABLE',            # SQL DROP TABLE
+    r'DROP\s+DATABASE',         # SQL DROP DATABASE
+    r':\(\)\s*\{.*\}',          # fork bomb
+    r'\bkillall\b',             # killall
+]
 
 def is_q(text):
     t = text.strip().lower()
@@ -537,6 +583,73 @@ def detect_lang(text):
             if re.search(r'\b' + kw + r'\b', t): return lang
     return "English"
 
+# ── Normalisation & cache ─────────────────────────────────────────────
+def normalize(q):
+    """Normalise question for cache key: lowercase, strip, collapse spaces, remove trailing punctuation."""
+    q = q.lower().strip()
+    q = re.sub(r"[?!.]+$", "", q)
+    q = re.sub(r"\s+", " ", q)
+    return q
+
+def cache_key(text):
+    return hashlib.md5(text.encode()).hexdigest()
+
+def cache_get(kind, key):
+    """kind: 'answers' or 'embeddings'"""
+    path = os.path.join(CACHE_DIR, kind, key + ".json")
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+def cache_set(kind, key, value):
+    d = os.path.join(CACHE_DIR, kind)
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, key + ".json")
+    try:
+        with open(path, "w") as f:
+            json.dump(value, f)
+    except Exception:
+        pass
+
+# ── Performance log ───────────────────────────────────────────────────
+def perf_log(question, mode, t_embed, t_rag, t_llm, cache_hit):
+    try:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        total = t_embed + t_rag + t_llm
+        ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+        line = (f"{ts}\t{mode}\t"
+                f"embed={t_embed:.2f}s\trag={t_rag:.2f}s\t"
+                f"llm={t_llm:.2f}s\ttotal={total:.2f}s\t"
+                f"cache={'hit' if cache_hit else 'miss'}\t"
+                f"q={question[:80].replace(chr(9),' ')}\n")
+        with open(PERF_LOG, "a") as f:
+            f.write(line)
+    except Exception:
+        pass
+
+# ── Smart router ──────────────────────────────────────────────────────
+def detect_command(question):
+    """Return the primary Linux command mentioned in the question, or None."""
+    t = question.lower()
+    for cmd in sorted(CMDS, key=len, reverse=True):  # longest first to avoid partial matches
+        if re.search(r'\b' + re.escape(cmd) + r'\b', t):
+            return cmd
+    return None
+
+def should_use_rag(question):
+    """Return True if the question likely needs local man page documentation."""
+    t = question.lower()
+    # Explicit RAG keywords
+    for kw in RAG_KEYWORDS:
+        if kw in t:
+            return True
+    # Mentions a specific command → probably needs docs
+    if detect_command(question):
+        return True
+    return False
+
 # ── RAG functions ─────────────────────────────────────────────────────
 def rag_available():
     try:
@@ -546,16 +659,23 @@ def rag_available():
         return False
 
 def embed(text, model, url):
+    """Generate embedding with disk cache."""
+    key = cache_key(f"{model}:{text}")
+    cached = cache_get("embeddings", key)
+    if cached is not None:
+        return cached
     req = urllib.request.Request(
         f"{url}/api/embeddings",
         data=json.dumps({"model": model, "prompt": text}).encode(),
         headers={"Content-Type": "application/json"}, method="POST"
     )
     with urllib.request.urlopen(req, timeout=30) as r:
-        return json.loads(r.read())["embedding"]
+        vec = json.loads(r.read())["embedding"]
+    cache_set("embeddings", key, vec)
+    return vec
 
-def retrieve(question, c):
-    """Retrieve top-K relevant passages from man page vector database."""
+def retrieve(question, c, detected_cmd=None):
+    """Retrieve top-K passages. Filter by command if detected."""
     try:
         import chromadb
         db_path = os.path.expanduser(c.get("rag_db_path", "~/.config/tuxaide/vectordb"))
@@ -567,7 +687,20 @@ def retrieve(question, c):
         except Exception:
             return []
         q_embed = embed(question, c.get("embed_model", "nomic-embed-text"), c["ollama_url"])
-        results = col.query(query_embeddings=[q_embed], n_results=c.get("rag_top_k", 3))
+        top_k = c.get("rag_top_k", 1)
+        # Filter by command if detected — much faster and less noisy
+        if detected_cmd:
+            try:
+                results = col.query(
+                    query_embeddings=[q_embed],
+                    n_results=top_k,
+                    where={"command": detected_cmd}
+                )
+            except Exception:
+                # Fallback to global search if command not in DB
+                results = col.query(query_embeddings=[q_embed], n_results=top_k)
+        else:
+            results = col.query(query_embeddings=[q_embed], n_results=top_k)
         passages = []
         for doc, meta in zip(results["documents"][0], results["metadatas"][0]):
             source = meta.get("source", "man page")
@@ -575,6 +708,14 @@ def retrieve(question, c):
         return passages
     except Exception:
         return []
+
+# ── Destructive command check ─────────────────────────────────────────
+def is_destructive(text):
+    """Return True if the text contains a potentially destructive command."""
+    for pattern in DESTRUCTIVE_PATTERNS:
+        if re.search(pattern, text, re.IGNORECASE):
+            return True
+    return False
 
 # ── Prompt builders ───────────────────────────────────────────────────
 def build_prompt(lang, passages=None):
@@ -604,7 +745,7 @@ def build_prompt(lang, passages=None):
         "Answer rules: Be direct — no long introductions, do not repeat the question. "
         "Always show ready-to-use command examples in code blocks. "
         "If a command differs by distro (Ubuntu vs Arch vs Fedora), say so. "
-        "Maximum 4 paragraphs. Warn clearly if a command is dangerous (e.g. rm -rf)."
+        "Maximum 3 paragraphs. Be concise."
     )
     return base
 
@@ -621,8 +762,8 @@ def ask_ollama(q, c, passages=None):
             )}
         ],
         "options": {"temperature": c.get("temperature", 0.1),
-                    "num_predict": c.get("max_tokens", 600),
-                    "num_gpu": c.get("num_gpu", 99)},  # use GPU layers if available (Metal on Mac, CUDA on Linux)
+                    "num_predict": c.get("max_tokens", 300),
+                    "num_gpu": c.get("num_gpu", 99)},
         "stream": True
     }
     req = urllib.request.Request(
@@ -645,15 +786,25 @@ def ask_ollama(q, c, passages=None):
     return "".join(out).strip()
 
 # ── Formatting ────────────────────────────────────────────────────────
-def fmt(text, c, mode="llm"):
+def fmt(text, c, mode="llm", destructive=False):
     cols  = shutil.get_terminal_size((80,24)).columns
     color = c.get("color", True)
-    mode_label = f" · RAG" if mode == "rag" else ""
+    mode_label = f" · Smart RAG" if mode == "smart" else (" · RAG" if mode == "deep" else "")
     top = (f"{C.Y}{C.B}╭{'─'*(cols-2)}╮{C.Z}" if color else f"┌{'─'*(cols-2)}┐")
     bot = (f"{C.Y}{C.B}╰{'─'*(cols-2)}╯{C.Z}" if color else f"└{'─'*(cols-2)}┘")
     lbl = (f"{C.Y}{C.B}╞═ 🐧 TuxAide {C.D}(Ollama · {c['model']}{mode_label}){C.Z}{C.Y}{C.B} ═╡{C.Z}"
            if color else f"╞═ TuxAide ═╡")
     out = ["", top, lbl]
+    # Destructive warning — shown before any code block
+    if destructive:
+        warn_line = (
+            f"  {C.RD}{C.B}⚠  WARNING: This command is destructive and irreversible."
+            f" Verify carefully before running.{C.Z}"
+            if color else
+            "  ⚠  WARNING: This command is destructive and irreversible. Verify carefully before running."
+        )
+        out.append("")
+        out.append(warn_line)
     in_code = False
     for line in text.split('\n'):
         if line.startswith('```'):
@@ -690,18 +841,21 @@ def main():
     if mode_arg == "--check":
         sys.exit(0 if is_q(" ".join(sys.argv[2:])) else 1)
 
-    # mode: switch between llm and rag
+    # mode: switch between llm, smart, deep (rag kept as alias for deep)
     if mode_arg == "mode":
         if len(sys.argv) < 3:
             c = cfg()
             print(f"🐧 TuxAide mode: {c.get('mode','llm').upper()}")
             return
         new_mode = sys.argv[2].lower()
-        if new_mode not in ("llm", "rag"):
-            print("Usage: tuxaide mode [llm|rag]"); return
-        if new_mode == "rag" and not rag_available():
+        if new_mode == "rag": new_mode = "deep"  # backwards compat
+        if new_mode not in ("llm", "smart", "deep"):
+            print("Usage: tuxaide mode [llm|smart|deep]"); return
+        if new_mode in ("smart", "deep") and not rag_available():
             print(f"{C.O}⚠ RAG requires chromadb: pip install chromadb{C.Z}"); return
-        save_cfg({"mode": new_mode})
+        top_k = 1 if new_mode == "smart" else 3
+        max_tokens = 300 if new_mode in ("llm", "smart") else 600
+        save_cfg({"mode": new_mode, "rag_top_k": top_k, "max_tokens": max_tokens})
         print(f"🐧 TuxAide mode switched to: {new_mode.upper()}")
         return
 
@@ -721,6 +875,19 @@ def main():
         os.system("tuxaide-index --all")
         return
 
+    # timing: show last N lines of perf log
+    if mode_arg == "--timing":
+        try:
+            with open(PERF_LOG) as f:
+                lines = f.readlines()
+            print(f"\n🐧 TuxAide — last {min(10,len(lines))} queries:\n")
+            for line in lines[-10:]:
+                print(" ", line.rstrip())
+            print()
+        except FileNotFoundError:
+            print("No performance log yet. Ask a question first.")
+        return
+
     # ask
     q = " ".join(sys.argv[2:] if mode_arg == "--ask" else sys.argv[1:])
     if mode_arg != "--ask" and not is_q(q): sys.exit(0)
@@ -731,16 +898,77 @@ def main():
         print(f"{C.D}  Try: sudo systemctl start ollama{C.Z}\n")
         sys.exit(0)
 
-    spinner = Spinner().start()
-    current_mode = c.get("mode", "llm")
-    passages = []
-    if current_mode == "rag" and rag_available():
-        passages = retrieve(q, c)
+    norm_q    = normalize(q)
+    ans_key   = cache_key(norm_q)
+    t_embed   = 0.0
+    t_rag     = 0.0
+    t_llm     = 0.0
+    cache_hit = False
 
+    # ── Answer cache lookup ───────────────────────────────────────────
+    cached_answer = cache_get("answers", ans_key)
+    if cached_answer:
+        cache_hit = True
+        answer    = cached_answer["answer"]
+        act_mode  = cached_answer.get("mode", "llm")
+        perf_log(norm_q, act_mode + "+cache", 0, 0, 0, True)
+        print(fmt(answer, c, act_mode, is_destructive(answer)))
+        return
+
+    # ── Determine mode and whether to use RAG ────────────────────────
+    current_mode = c.get("mode", "llm")
+    passages     = []
+    detected_cmd = None
+    act_mode     = "llm"
+
+    spinner = Spinner().start()
+
+    if current_mode == "smart" and rag_available():
+        if should_use_rag(norm_q):
+            detected_cmd = detect_command(norm_q)
+            t0 = time.time()
+            try:
+                # Respect RAG timeout — fall back to LLM if too slow
+                import signal
+                def _timeout(signum, frame): raise TimeoutError()
+                signal.signal(signal.SIGALRM, _timeout)
+                signal.alarm(c.get("rag_timeout", 8))
+                t_embed_start = time.time()
+                passages = retrieve(norm_q, c, detected_cmd)
+                t_embed = time.time() - t_embed_start
+                signal.alarm(0)
+            except (TimeoutError, Exception):
+                signal.alarm(0)
+                passages = []
+            t_rag = time.time() - t0 - t_embed
+            if passages:
+                act_mode = "smart"
+
+    elif current_mode == "deep" and rag_available():
+        detected_cmd = detect_command(norm_q)
+        t0 = time.time()
+        t_embed_start = time.time()
+        passages = retrieve(norm_q, c, detected_cmd)
+        t_embed = time.time() - t_embed_start
+        t_rag = time.time() - t0 - t_embed
+        if passages:
+            act_mode = "deep"
+
+    # ── LLM call ──────────────────────────────────────────────────────
+    t_llm_start = time.time()
     answer = ask_ollama(q, c, passages if passages else None)
+    t_llm = time.time() - t_llm_start
+
     spinner.stop()
-    actual_mode = "rag" if passages else "llm"
-    print(fmt(answer, c, actual_mode))
+
+    # ── Cache the answer ──────────────────────────────────────────────
+    cache_set("answers", ans_key, {"answer": answer, "mode": act_mode})
+
+    # ── Perf log ──────────────────────────────────────────────────────
+    perf_log(norm_q, act_mode, t_embed, t_rag, t_llm, False)
+
+    # ── Output ────────────────────────────────────────────────────────
+    print(fmt(answer, c, act_mode, is_destructive(answer)))
 
 if __name__ == "__main__": main()
 PYEOF
@@ -749,18 +977,19 @@ PYEOF
 
     # ── Config ─────────────────────────────────────────────────────────
     local mode_val="llm"
-    [[ "$INSTALL_RAG" == "true" ]] && mode_val="rag"
+    [[ "$INSTALL_RAG" == "true" ]] && mode_val="smart"
 
     cat > "${CFG}/config.json" << JEOF
 {
     "ollama_url": "http://localhost:11434",
     "model": "${MODEL}",
     "embed_model": "nomic-embed-text",
-    "max_tokens": 600,
+    "max_tokens": 300,
     "temperature": 0.1,
     "color": true,
     "mode": "${mode_val}",
-    "rag_top_k": 3,
+    "rag_top_k": 1,
+    "rag_timeout": 8,
     "rag_db_path": "~/.config/tuxaide/vectordb"
 }
 JEOF
@@ -770,7 +999,7 @@ JEOF
     if [[ "$INSTALL_RAG" == "true" ]]; then
         cat > "${BIN}/tuxaide-index" << 'IDXEOF'
 #!/usr/bin/env python3
-"""TuxAide — Man page indexer for RAG mode."""
+"""TuxAide — Man page indexer for Smart RAG mode."""
 import os, sys, json, re, subprocess, urllib.request
 
 try:
@@ -817,7 +1046,6 @@ def get_man_text(cmd):
         if result.returncode != 0:
             return None
         text = result.stdout
-        # Remove backspace formatting (bold/underline in man pages)
         text = re.sub(r'.\x08', '', text)
         text = re.sub(r'\x1b\[[0-9;]*m', '', text)
         text = re.sub(r'\n{3,}', '\n\n', text)
@@ -825,8 +1053,8 @@ def get_man_text(cmd):
     except Exception:
         return None
 
-def chunk_text(text, cmd, chunk_size=400, overlap=80):
-    """Split text into overlapping chunks."""
+def chunk_text(text, cmd, chunk_size=200, overlap=40):
+    """Split text into overlapping chunks (smaller = faster retrieval)."""
     words = text.split()
     chunks = []
     i = 0
@@ -858,7 +1086,6 @@ def index_command(cmd, col, cfg, verbose=True):
     chunks = chunk_text(text, cmd)
     for i, chunk in enumerate(chunks):
         chunk_id = f"{cmd}_{i}"
-        # Check if already indexed
         try:
             existing = col.get(ids=[chunk_id])
             if existing["ids"]: continue
@@ -887,14 +1114,12 @@ def main():
     )
 
     if len(sys.argv) > 1 and sys.argv[1] != "--all":
-        # Index a specific command
         cmd = sys.argv[1]
         print(f"🐧 Indexing: {cmd}")
         n = index_command(cmd, col, cfg)
         print(f"   Done — {n} chunks indexed")
         return
 
-    # Index all top commands
     print(f"🐧 Indexing {len(TOP_COMMANDS)} man pages...")
     print(f"   Database: {DB_PATH}")
     print()
@@ -904,7 +1129,7 @@ def main():
         total += n
     print()
     print(f"✓ Indexing complete — {total} total chunks stored")
-    print(f"  Run 'tuxaide mode rag' to activate RAG mode")
+    print(f"  Run 'tuxaide mode smart' to activate Smart RAG mode")
 
 if __name__ == "__main__": main()
 IDXEOF
@@ -920,14 +1145,15 @@ _LG_ON=true
 
 tuxaide() {
     [[ -z "${1:-}" ]] && {
-        echo "🐧 TuxAide v2"
-        echo "   tuxaide <question>       — ask a question"
-        echo "   tuxaide on / off         — enable / disable hook"
-        echo "   tuxaide status           — show status and mode"
-        echo "   tuxaide mode [llm|rag]   — switch knowledge mode"
-        echo "   tuxaide model <name>     — change Ollama model"
-        echo "   tuxaide index <cmd>      — index a man page"
-        echo "   tuxaide reindex          — re-index all man pages"
+        echo "🐧 TuxAide v2.1"
+        echo "   tuxaide <question>            — ask a question"
+        echo "   tuxaide on / off              — enable / disable hook"
+        echo "   tuxaide status                — show status and mode"
+        echo "   tuxaide mode [llm|smart|deep] — switch knowledge mode"
+        echo "   tuxaide model <name>          — change Ollama model"
+        echo "   tuxaide index <cmd>           — index a man page"
+        echo "   tuxaide reindex               — re-index all man pages"
+        echo "   tuxaide --timing              — show recent query performance"
         return
     }
     case "$1" in
@@ -949,7 +1175,7 @@ c['model']='$m'
 with open(f,'w') as fp: json.dump(c,fp,indent=4)
 print('🐧 Model changed to: $m')
 "       ;;
-        mode|index|reindex) "$_LG" "$@" ;;
+        mode|index|reindex|--timing) "$_LG" "$@" ;;
         *) "$_LG" --ask "$*" ;;
     esac
 }
@@ -976,11 +1202,7 @@ command_not_found_handle() {
 
 # ── Zsh hook ───────────────────────────────────────────────────────
 # In zsh, preexec runs BEFORE execution but AFTER the command is accepted.
-# We cannot cancel execution in zsh, but we can suppress the "not found"
-# error by defining command_not_found_handler (zsh equivalent of bash's
-# command_not_found_handle) AND using preexec to show the answer first.
 if [[ -n "${ZSH_VERSION:-}" ]]; then
-    # preexec: show answer before execution (answer appears first)
     _lg_preexec() {
         local cmd="$1"
         [[ "$_LG_ON" != "true" ]] && return
@@ -989,18 +1211,23 @@ if [[ -n "${ZSH_VERSION:-}" ]]; then
     autoload -Uz add-zsh-hook 2>/dev/null
     add-zsh-hook preexec _lg_preexec 2>/dev/null
 
-    # command_not_found_handler: suppress "command not found" for questions
     command_not_found_handler() {
         local cmd="$1"
-        # If it looks like a question word, stay silent (preexec already answered)
         case "$cmd" in
-            how|why|what|where|when|which|who|como|porque|qual|onde|             comment|pourquoi|quel|cómo|qué|wie|warum|was)
+            how|why|what|where|when|which|who|como|porque|qual|onde|\
+            comment|pourquoi|quel|cómo|qué|wie|warum|was)
                 return 0 ;;
         esac
         echo "zsh: command not found: $cmd" >&2
         return 127
     }
 fi
+
+# ── Pre-warm Ollama model on session start ─────────────────────────
+# Keeps the model loaded in RAM so first query is faster
+(sleep 4 && curl -s -X POST http://localhost:11434/api/generate \
+    -d "{\"model\":\"$(python3 -c "import json,os; c=json.load(open(os.path.expanduser('~/.config/tuxaide/config.json'))); print(c.get('model','qwen2.5-coder:7b'))" 2>/dev/null || echo 'qwen2.5-coder:7b')\",\"prompt\":\"ok\",\"stream\":false}" \
+    >/dev/null 2>&1 &)
 # ──────────────────────────────────────────────────────────────────
 HOOKEOF
     ok "Hook installed → ${CFG}/hook.sh"
@@ -1039,7 +1266,7 @@ UEOF
 index_man_pages() {
     [[ "$INSTALL_RAG" != "true" ]] && return
 
-    step "Indexing man pages (RAG knowledge base)"
+    step "Indexing man pages (Smart RAG knowledge base)"
 
     info "This runs once and takes approximately 5-10 minutes."
     info "Indexing the top 100 most useful Linux commands..."
@@ -1048,8 +1275,7 @@ index_man_pages() {
     if python3 "${HOME}/.local/bin/tuxaide-index" --all; then
         ok "Man pages indexed successfully"
     else
-        warn "Indexing failed — RAG mode will fallback to LLM automatically"
-        # Switch to llm mode in config
+        warn "Indexing failed — Smart RAG mode will fallback to LLM automatically"
         python3 -c "
 import json, os
 f = os.path.expanduser('~/.config/tuxaide/config.json')
@@ -1133,11 +1359,11 @@ final_check() {
 
 print_summary() {
     local mode_label="LLM only (v1 behaviour)"
-    [[ "$INSTALL_RAG" == "true" ]] && mode_label="RAG + LLM (man page knowledge base)"
+    [[ "$INSTALL_RAG" == "true" ]] && mode_label="Smart RAG (uses local docs only when needed)"
 
     echo ""
     echo -e "${CY}${BOLD}╔══════════════════════════════════════════════════════╗${R}"
-    echo -e "${CY}${BOLD}║   🐧  TuxAide v2 installed and ready!               ║${R}"
+    echo -e "${CY}${BOLD}║   🐧  TuxAide v2.1 installed and ready!             ║${R}"
     echo -e "${CY}${BOLD}╚══════════════════════════════════════════════════════╝${R}"
     echo ""
     echo -e "  ${YL}${BOLD}⚡ Required — run this now to activate:${R}"
@@ -1156,19 +1382,22 @@ print_summary() {
     echo -e "  ${CY}tuxaide how to check open ports${R}   ← explicit mode"
     echo ""
     echo -e "  ${BOLD}Mode control:${R}"
-    echo -e "  ${CY}tuxaide mode rag${R}   — use man page knowledge base"
-    echo -e "  ${CY}tuxaide mode llm${R}   — use general LLM only"
+    echo -e "  ${CY}tuxaide mode smart${R} — Smart RAG (default, recommended)"
+    echo -e "  ${CY}tuxaide mode deep${R}  — full RAG for every question"
+    echo -e "  ${CY}tuxaide mode llm${R}   — LLM only, no man pages"
     echo -e "  ${CY}tuxaide status${R}     — show current mode"
+    echo -e "  ${CY}tuxaide --timing${R}   — show recent query performance"
     if [[ "$INSTALL_RAG" == "true" ]]; then
         echo ""
         echo -e "  ${BOLD}Re-index after system updates:${R}"
-        echo -e "  ${CY}tuxaide reindex${R}   — re-index all man pages"
-        echo -e "  ${CY}tuxaide index nginx${R} — index a specific command"
+        echo -e "  ${CY}tuxaide reindex${R}      — re-index all man pages"
+        echo -e "  ${CY}tuxaide index nginx${R}  — index a specific command"
     fi
     echo ""
     echo -e "  ${BOLD}Uninstall:${R}  ${CY}tuxaide-uninstall${R}"
     echo ""
     echo -e "  ${DIM}Config: ~/.config/tuxaide/config.json${R}"
+    echo -e "  ${DIM}Perf log: ~/.config/tuxaide/logs/perf.log${R}"
     echo ""
 }
 

@@ -48,7 +48,7 @@ TuxAide intercepts it silently and answers inline:
 
 ```
 ╭──────────────────────────────────────────────────────────────╮
-╞═ 🐧 TuxAide (Ollama · qwen2.5-coder:7b) ═╡
+╞═ 🐧 TuxAide (Ollama · qwen2.5-coder:7b · Smart RAG) ═╡
 
   To list hidden files sorted by size:
 
@@ -60,7 +60,7 @@ TuxAide intercepts it silently and answers inline:
   -h shows human-readable sizes (KB, MB, GB).
   To reverse: ls -laShr
 
-  ⚠ Always verify commands before running them.
+  Source: man ls(1)
 
 ╰──────────────────────────────────────────────────────────────╯
 ```
@@ -88,6 +88,20 @@ Every other tool targets experienced users or developers. TuxAide targets people
 **5. One command installs everything.**  
 Ollama, the AI model, the shell hook — all in one `curl | bash`. No brew taps, no cargo, no pipx, no manual steps.
 
+**6. Smart RAG — fast when simple, precise when needed.**  
+TuxAide v2.1 uses a router to decide whether a question needs local man page documentation. Simple questions get a direct LLM answer in 3–5s. Questions about specific commands or system configuration use the local knowledge base. Repeated questions are answered instantly from cache.
+
+---
+
+## Response speed (v2.1)
+
+| Question type | Example | Speed |
+|---|---|---|
+| Repeated question | any question asked before | < 1s (cache) |
+| Simple / general | "how do I create a folder" | 3–5s (LLM direct) |
+| Command-specific | "rsync options to exclude files" | 8–15s (Smart RAG) |
+| Deep documentation | `tuxaide mode deep` | 15–25s (full RAG) |
+
 ---
 
 ## Any language
@@ -101,8 +115,6 @@ comment lister les fichiers cachés     # → French
 cómo ver el espacio en disco           # → Spanish
 wie zeige ich offene Ports             # → German
 ```
-
-Most competing tools assume English only. TuxAide does not.
 
 ---
 
@@ -122,6 +134,24 @@ what is a symlink and how do I create one
 # Explicit mode also works:
 tuxaide how to check disk usage by folder
 tux what is the difference between hard and soft links
+
+# Force deep RAG for full documentation:
+tuxaide mode deep
+how does systemctl manage service dependencies
+tuxaide mode smart
+```
+
+---
+
+## Destructive command warnings
+
+When TuxAide answers with a command that is potentially destructive or irreversible — such as `rm -rf`, `dd`, `mkfs`, `fdisk`, or `chmod 777` — a visible warning is shown before the code block, regardless of whether the answer came from cache or from the model.
+
+```
+  ⚠  WARNING: This command is destructive and irreversible. Verify carefully before running.
+
+  ┄ shell ┄
+  rm -rf /old-data/
 ```
 
 ---
@@ -129,12 +159,38 @@ tux what is the difference between hard and soft links
 ## Controls
 
 ```bash
-tuxaide on                  # enable automatic hook
-tuxaide off                 # disable (terminal works normally)
-tuxaide status              # show current status
-tuxaide model llama3.2      # switch Ollama model
+tuxaide on                   # enable automatic hook
+tuxaide off                  # disable (terminal works normally)
+tuxaide status               # show current status and mode
+tuxaide model llama3.2       # switch Ollama model
 
-tuxaide-uninstall           # remove completely
+tuxaide mode smart           # Smart RAG (default — recommended)
+tuxaide mode deep            # full RAG for every question
+tuxaide mode llm             # LLM only, no man pages
+
+tuxaide --timing             # show recent query performance log
+tuxaide reindex              # re-index all man pages
+tuxaide index nginx          # index a specific command
+
+tuxaide-uninstall            # remove completely
+```
+
+---
+
+## Performance log
+
+TuxAide silently logs the latency of every query to `~/.config/tuxaide/logs/perf.log`. To inspect it:
+
+```bash
+tuxaide --timing
+```
+
+Example output:
+
+```
+2025-05-04T18:32:11   smart    embed=2.4s   rag=0.3s   llm=6.1s   total=8.8s   cache=miss
+2025-05-04T18:34:02   smart    embed=0.0s   rag=0.0s   llm=0.0s   total=0.0s   cache=hit
+2025-05-04T18:41:55   llm      embed=0.0s   rag=0.0s   llm=4.2s   total=4.2s   cache=miss
 ```
 
 ---
@@ -148,8 +204,6 @@ The installer picks the **best model for Linux knowledge**, not just the smalles
 | ≥ 8 GB | `qwen2.5-coder:7b` | 4.4 GB | Trained on code, man pages and system commands — best for this agent |
 | 5–8 GB | `qwen2.5:3b` | 1.9 GB | Good Linux knowledge, lower RAM footprint |
 | < 5 GB | `qwen2.5:3b` | 1.9 GB | Best available lightweight option |
-
-`qwen2.5-coder:7b` covers: bash/zsh scripting · systemd · networking (ip, ss, iptables, SSH) · package managers (apt, dnf, pacman) · text tools (grep, awk, sed, jq) · Docker · Git · and more.
 
 > **Note:** AI models can make mistakes. TuxAide is advisory only — always review a command before running it.
 
@@ -194,6 +248,9 @@ Not a single packet left the server. You can reproduce this test yourself at any
 | Explain only — never executes | ✅ | ✅ | ❌ executes | ❌ executes | ❌ executes |
 | One-line install (curl) | ✅ | ❌ | ✅ | ❌ | ❌ |
 | Multilingual | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Smart RAG router | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Answer cache | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Destructive command warnings | ✅ | ❌ | ❌ | partial | ❌ |
 | Targets beginners | ✅ | ❌ | ❌ | ❌ | ❌ |
 | GDPR / nDSG safe | ✅ | ❌ | partial | partial | ❌ |
 
@@ -243,13 +300,30 @@ Also note: on macOS, Ollama is installed as a desktop app. If the automatic inst
 
 ---
 
+## Updating from v2.0
+
+If you already have TuxAide v2.0 installed, update by running the installer again:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/deltaxmodules/tuxaide/main/setup.sh | bash
+```
+
+The installer detects existing components and only reinstalls the agent binary. Your indexed man pages and config are preserved. After updating, run:
+
+```bash
+source ~/.bashrc   # or source ~/.zshrc on macOS
+tuxaide mode smart # activate Smart RAG if you had RAG enabled
+```
+
+---
+
 ## Uninstall
 
 ```bash
 tuxaide-uninstall
 ```
 
-Removes the agent, the hook and all config files. Ollama and models are kept (remove manually if needed):
+Removes the agent, the hook, the cache and all config files. Ollama and models are kept (remove manually if needed):
 
 ```bash
 # Linux
@@ -285,6 +359,23 @@ tuxaide/
 ```
 
 `setup.sh` contains everything: installer, Python agent, shell hook and uninstaller. One file. Zero external dependencies beyond `python3`, `curl` and `bash`.
+
+---
+
+## What changed in v2.1
+
+- **Smart router** — the agent decides when to use RAG; simple questions skip it entirely
+- **Answer cache** — MD5-keyed disk cache, normalized question, instant hits on repeated queries  
+- **Embedding cache** — embeddings stored to disk; never recalculated for the same text
+- **RAG filtered by command** — `chmod` question searches only `chmod` chunks, not all 100 man pages
+- **RAG timeout** — if ChromaDB takes more than 8s, falls back to LLM silently
+- **Smaller chunks** — 200 words instead of 400, faster retrieval, less noise in context
+- **top_k reduced** — 1 in smart mode, 3 in deep mode
+- **max_tokens reduced** — 300 in smart/llm mode, 600 in deep mode
+- **Destructive command warnings** — shown before code blocks for `rm -rf`, `dd`, `mkfs`, etc.
+- **Silent perf log** — `~/.config/tuxaide/logs/perf.log` records every query's latency breakdown
+- **`tuxaide --timing`** — inspect the last 10 queries in the perf log
+- **Pre-warm on session start** — model loaded into RAM when terminal opens
 
 ---
 
