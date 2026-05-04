@@ -577,8 +577,10 @@ def build_prompt(lang, passages=None):
         )
         base += (
             "Use the following excerpts from this system's man pages as your PRIMARY source. "
-            "Base your answer on these excerpts. "
-            "At the end of your answer, cite the source (e.g. 'Source: man ls(1)')." + NL +
+            "Base your answer ONLY on these excerpts — do not add information not present in them. "
+            "MANDATORY: The LAST line of your answer MUST be exactly: "
+            "'Source: ' followed by the man page name (e.g. Source: man ls(1)). "
+            "Never skip the source citation." + NL +
             "Man page excerpts:" + NL + context + NL
         )
     base += (
@@ -599,7 +601,8 @@ def ask_ollama(q, c, passages=None):
             {"role": "user",   "content": q}
         ],
         "options": {"temperature": c.get("temperature", 0.1),
-                    "num_predict": c.get("max_tokens", 600)},
+                    "num_predict": c.get("max_tokens", 600),
+                    "num_gpu": c.get("num_gpu", 99)},  # use GPU layers if available (Metal on Mac, CUDA on Linux)
         "stream": True
     }
     req = urllib.request.Request(
@@ -951,13 +954,36 @@ command_not_found_handle() {
 }
 
 # ── Zsh hook ───────────────────────────────────────────────────────
+# In zsh, preexec runs BEFORE execution but AFTER the command is accepted.
+# We cannot cancel execution in zsh, but we can suppress the "not found"
+# error by defining command_not_found_handler (zsh equivalent of bash's
+# command_not_found_handle) AND using preexec to show the answer first.
 if [[ -n "${ZSH_VERSION:-}" ]]; then
+    # preexec: show answer before execution (answer appears first)
     _lg_preexec() {
         local cmd="$1"
+        [[ "$_LG_ON" != "true" ]] && return
         "$_LG" --check "$cmd" 2>/dev/null && "$_LG" --ask "$cmd"
     }
     autoload -Uz add-zsh-hook 2>/dev/null
     add-zsh-hook preexec _lg_preexec 2>/dev/null
+
+    # command_not_found_handler: suppress zsh "command not found" error
+    # for words that are actually questions (already answered by preexec)
+    command_not_found_handler() {
+        local cmd="$1"
+        # Get full command from history
+        local full_cmd
+        full_cmd=$(fc -ln -1 2>/dev/null | sed 's/^[[:space:]]*//')
+        local question="${full_cmd:-$*}"
+        # If it was a question, stay silent (already answered by preexec)
+        if "$_LG" --check "$question" 2>/dev/null; then
+            return 0
+        fi
+        # Not a question — show normal error
+        echo "zsh: command not found: $cmd" >&2
+        return 127
+    }
 fi
 # ──────────────────────────────────────────────────────────────────
 HOOKEOF
