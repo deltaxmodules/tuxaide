@@ -80,8 +80,12 @@ Before installing, the installer shows a full diagnosis:
 
 Write your Linux question directly in the terminal:
 
-```
+```bash
+# bash — type directly (any length)
 $ how do I configure nginx as a reverse proxy
+
+# zsh — use tux for longer questions
+$ tux how do I configure nginx as a reverse proxy
 ```
 
 TuxAide answers based on the nginx man page installed on your system:
@@ -150,6 +154,26 @@ tuxaide mode llm    # use general LLM only (v1 behaviour)
 tuxaide mode        # show current mode
 tuxaide status      # show status and current mode
 ```
+
+---
+
+## zsh — automatic vs explicit mode
+
+In **zsh**, the automatic hook works best for short questions (2-4 words). For longer questions, use the explicit mode:
+
+```bash
+# Short questions — automatic hook works perfectly
+how do I list files
+comment voir espace disque
+como ver portas abertas
+
+# Longer questions — use explicit mode
+tux what is the difference between hard and soft links
+tuxaide how do I configure nginx as a reverse proxy
+tux comment configurer un cron pour 3h du matin
+```
+
+In **bash**, both short and long questions work automatically without any prefix.
 
 ---
 
