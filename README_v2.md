@@ -103,7 +103,7 @@ TuxAide answers based on the nginx man page installed on your system:
 
   Reload the configuration with: sudo nginx -s reload
 
-  Source: man nginx(8)
+  Source: man nginx(8)   ← always cited when using RAG mode
 
   ⚠ Always verify commands before running them.
 
@@ -111,6 +111,8 @@ TuxAide answers based on the nginx man page installed on your system:
 ```
 
 The `Source: man nginx(8)` citation tells you exactly where the information came from.
+
+> **zsh users:** TuxAide answers the question and suppresses the "command not found" error — no noise in the terminal.
 
 ---
 
@@ -191,7 +193,9 @@ tuxaide-uninstall           # remove completely
 | GPU | Optional | Optional (faster) |
 | Install time | ~10 min | ~25 min |
 | Response time (CPU) | 4–10s | 5–12s |
-| Response time (GPU) | ~1–2s | ~2–3s |
+| Response time (GPU / Metal) | ~1–2s | ~2–3s |
+
+> **macOS:** Ollama uses Apple Metal automatically when available — no configuration needed.
 
 ### AI models
 
