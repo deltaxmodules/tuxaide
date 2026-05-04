@@ -197,7 +197,7 @@ diagnose_system() {
     # Confirmation
     echo ""
     ask "Proceed with installation? [Y/n] "
-    read -r CONFIRM
+    read -r CONFIRM </dev/tty
     CONFIRM="${CONFIRM:-y}"
     if [[ ! "$CONFIRM" =~ ^[yYsS]$ ]]; then
         echo ""
@@ -235,7 +235,7 @@ ask_rag() {
     fi
 
     ask "Install RAG mode? (recommended) [Y/n] "
-    read -r RAG_CONFIRM
+    read -r RAG_CONFIRM </dev/tty
     RAG_CONFIRM="${RAG_CONFIRM:-y}"
     if [[ "$RAG_CONFIRM" =~ ^[yYsS]$ ]]; then
         INSTALL_RAG=true
