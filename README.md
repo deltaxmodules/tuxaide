@@ -1,7 +1,7 @@
 # 🐧 TuxAide
 
 > **Stop searching. Just ask your terminal.**
-> Local AI assistant that runs entirely on your machine — no cloud, no API, no setup friction.
+> No trigger word. No cloud. No command execution. Just ask your terminal in plain English.
 
 <div align="center">
 
@@ -85,17 +85,17 @@ Normal commands (`ls -la`, `git commit`, `sudo apt update`) pass through untouch
 
 ## Why TuxAide
 
-**1. No trigger word needed.**
+**1. Built for people learning Linux.**
+No remembering flags. No searching docs. Just ask.
+
+**2. No trigger word needed.**
 You don’t type `ask`, `hey` or anything else. Just write your question — TuxAide hooks into the shell and responds.
 
-**2. It only explains. Never executes.**
+**3. It only explains. Never executes.**
 Safer by design. You stay in control of what runs on your system.
 
-**3. 100% local by default.**
+**4. 100% local by default.**
 No API key. No account. No cloud. Nothing leaves your machine — ever.
-
-**4. Built for people learning Linux.**
-No remembering flags. No searching docs. Just ask.
 
 **5. One command installs everything.**
 Ollama, model, shell hook — all in one command.
@@ -182,7 +182,7 @@ tuxaide-uninstall
 * No external calls
 * No tracking
 * Works offline after install
-* GDPR / NIS2 / Swiss nDSG friendly
+* Designed for data-sovereign and offline environments
 
 ---
 
