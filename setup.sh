@@ -7,7 +7,9 @@ set -euo pipefail
 TMP_INSTALL="$(mktemp)"
 trap 'rm -f "$TMP_INSTALL"' EXIT
 
-if curl -fsSL "https://raw.githubusercontent.com/deltaxmodules/tuxaide/main/install.sh" -o "$TMP_INSTALL"; then
+echo "[TuxAide] Downloading installer..."
+if curl -fSL --progress-bar "https://raw.githubusercontent.com/deltaxmodules/tuxaide/main/install.sh" -o "$TMP_INSTALL"; then
+    echo "[TuxAide] Starting installer..."
     bash "$TMP_INSTALL"
 else
     echo "Failed to download install.sh from GitHub." >&2
