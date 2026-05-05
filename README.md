@@ -207,4 +207,6 @@ Open source project — contributions welcome.
 
 👉 https://github.com/deltaxmodules/tuxaide
 
+Built with the help of AI tools (Claude, Ollama).
+
 ---
