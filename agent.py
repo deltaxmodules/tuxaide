@@ -147,6 +147,42 @@ def is_context_explain_query(text):
     ]
     return any(p in t for p in patterns)
 
+class ContextIntentDetector:
+    """Isolated detector for routing contextual follow-up questions."""
+    DEICTIC_TERMS = {
+        "this", "that", "it", "isto", "isso", "este", "esta", "esse", "essa",
+        "esto", "eso", "ceci", "cela", "dies", "das"
+    }
+    ERROR_TERMS = {
+        "error", "failed", "fail", "issue", "problem", "erro", "falhou",
+        "falha", "problema", "erroro", "erreur", "fehler"
+    }
+
+    @staticmethod
+    def _tokens(text):
+        return re.findall(r"[a-zA-ZÀ-ÿ']+", text.lower())
+
+    @classmethod
+    def looks_like_context_followup(cls, text):
+        t = text.strip().lower()
+        if not t:
+            return False
+        if is_context_explain_query(t):
+            return True
+        tokens = cls._tokens(t)
+        if not tokens:
+            return False
+        short_phrase = len(tokens) <= 10
+        has_deictic = any(tok in cls.DEICTIC_TERMS for tok in tokens)
+        has_error_word = any(tok in cls.ERROR_TERMS for tok in tokens)
+        return short_phrase and (has_deictic or has_error_word)
+
+    @classmethod
+    def should_explain_last(cls, text, session_capture_enabled, has_last_run):
+        if not session_capture_enabled or not has_last_run:
+            return False
+        return cls.looks_like_context_followup(text)
+
 def default_context_query():
     return "Explain the last shell command output and error in simple terms. Identify cause and suggest next step."
 
@@ -515,15 +551,14 @@ def main():
         sys.exit(0)
 
     effective_q = q
-    context_query = c.get("session_capture", False) and is_context_explain_query(q)
-    if context_query:
-        last_run = load_last_shell_context()
-        if last_run:
-            effective_q = build_contextual_question(q, last_run)
-        else:
-            msg = "No recent shell execution context found in this session. Run a command with: tuxaide run \"<command>\""
-            print(fmt(msg, c, "llm", False))
-            return
+    last_run = load_last_shell_context() if c.get("session_capture", False) else None
+    context_query = ContextIntentDetector.should_explain_last(
+        q,
+        c.get("session_capture", False),
+        bool(last_run),
+    )
+    if context_query and last_run:
+        effective_q = build_contextual_question(q, last_run)
 
     norm_q    = normalize(effective_q if context_query else q)
     ans_key   = cache_key(norm_q)

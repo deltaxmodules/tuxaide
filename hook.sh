@@ -16,18 +16,6 @@ _tux_is_interactive_cmd() {
     esac
 }
 
-_tux_is_followup_query() {
-    local line
-    line="$(printf '%s' "$*" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
-    case "$line" in
-        "what does this mean"*|"why did this fail"*|"explain this output"*|"explain this error"*|\
-        "porque deu este erro"*|"por que deu este erro"*|"que erro foi este"*|"porque falhou"*|\
-        "o que quer dizer isto"*|"o que significa isto"*|"isto significa o quê"*|"explica este output"*)
-            return 0 ;;
-    esac
-    return 1
-}
-
 _tux_should_handle_question_line() {
     local line="$*"
     [[ -z "$line" ]] && return 1
@@ -140,10 +128,6 @@ command_not_found_handle() {
     local full_cmd
     full_cmd=$(HISTTIMEFORMAT="" history 1 2>/dev/null | sed 's/^ *[0-9]* *//')
     local question="${full_cmd:-$*}"
-    if _tux_is_followup_query "$question"; then
-        noglob "$_LG" --explain-last "$question"
-        return 0
-    fi
     if _tux_should_handle_question_line "$question"; then
         noglob "$_LG" --ask "$question"
         return 0
@@ -166,19 +150,10 @@ if [[ -n "${ZSH_VERSION:-}" ]]; then
     command_not_found_handler() {
         local cmd="$1"
         local line="$*"
-        if _tux_is_followup_query "$line"; then
-            noglob "$_LG" --explain-last "$line"
-            return 0
-        fi
         if _tux_should_handle_question_line "$line"; then
             noglob "$_LG" --ask "$line"
             return 0
         fi
-        case "$cmd" in
-            how|why|what|where|when|which|who|como|porque|qual|onde|\
-            comment|pourquoi|quel|cómo|qué|wie|warum|was)
-                return 0 ;;
-        esac
         echo "zsh: command not found: $cmd" >&2
         return 127
     }
