@@ -1,7 +1,7 @@
 # 🐧 TuxAide
 
 > **Stop searching. Just ask your terminal.**
-> No trigger word. No cloud. No command execution. Just ask your terminal in plain English.
+> No trigger word. No cloud. No command execution by TuxAide. Just ask your terminal in plain English.
 
 <div align="center">
 
@@ -161,6 +161,7 @@ rm -rf /old-data/
 tuxaide on
 tuxaide off
 tuxaide status
+tuxaide run "ls /missing-path"
 tuxaide model llama3.2
 
 tuxaide mode smart
@@ -173,6 +174,34 @@ tuxaide index nginx
 
 tuxaide-uninstall
 ```
+
+---
+
+## Shell Error Context (v2.2)
+
+TuxAide can explain the last command output/error when you ask follow-up questions such as:
+
+```bash
+tuxaide run "ls /naoexiste"
+tuxaide "porque deu este erro?"
+```
+
+This uses local session context from your latest captured shell execution.
+
+### Capture behavior
+
+- `session_capture` is enabled by default (`true`)
+- session file: `~/.config/tuxaide/session.json`
+- output is truncated predictably:
+  - max 500 lines
+  - head 50 + tail 50
+  - keep keyword lines: `error`, `warn`, `fatal`, `failed`, `denied`
+
+### Privacy
+
+- all captured context is local-only
+- no cloud sync
+- no external telemetry
 
 ---
 
