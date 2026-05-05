@@ -11,6 +11,7 @@ for rc in ~/.bashrc ~/.zshrc ~/.profile; do
     echo -e "  ${GR}✓${R} Removed from $rc"
 done
 rm -f ~/.local/bin/tuxaide ~/.local/bin/tuxaide-index ~/.local/bin/tuxaide-uninstall
+rm -f ~/.config/tuxaide/session.json ~/.config/tuxaide/session_writer.py ~/.config/tuxaide/session.lock
 rm -rf ~/.config/tuxaide
 echo -e "  ${GR}✓${R} Files removed"
 echo ""
