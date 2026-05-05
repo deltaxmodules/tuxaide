@@ -1,6 +1,53 @@
 # ── TuxAide hook ── loaded by ~/.bashrc / ~/.zshrc ─────────────────
 _LG="${HOME}/.local/bin/tuxaide"
 _LG_ON=true
+_TUX_CFG="${HOME}/.config/tuxaide/config.json"
+_TUX_SESSION_WRITER="${HOME}/.config/tuxaide/session_writer.py"
+_TUX_SESSION_FILE="${HOME}/.config/tuxaide/session.json"
+
+_tux_session_capture_enabled() {
+    python3 -c "import json,os; c=json.load(open(os.path.expanduser('${_TUX_CFG}'))); print(str(bool(c.get('session_capture', False))).lower())" 2>/dev/null
+}
+
+_tux_is_interactive_cmd() {
+    case "$1" in
+        vim|vi|nano|top|htop|less|more|man|screen|tmux) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+_tux_run() {
+    local cmd="$*"
+    [[ -z "$cmd" ]] && { echo "Usage: tuxaide run <command>"; return 1; }
+
+    local capture_enabled
+    capture_enabled=$(_tux_session_capture_enabled)
+
+    local stdout_file stderr_file
+    stdout_file="$(mktemp)"
+    stderr_file="$(mktemp)"
+
+    bash -lc "$cmd" >"$stdout_file" 2>"$stderr_file"
+    local rc=$?
+
+    [[ -s "$stdout_file" ]] && cat "$stdout_file"
+    [[ -s "$stderr_file" ]] && cat "$stderr_file" >&2
+
+    if [[ "$capture_enabled" == "true" && -x "$_TUX_SESSION_WRITER" ]]; then
+        local first_word capturable shell_name
+        first_word="${cmd%% *}"
+        capturable="true"
+        _tux_is_interactive_cmd "$first_word" && capturable="false"
+        shell_name="${SHELL##*/}"
+        (
+            flock -x 9
+            python3 "$_TUX_SESSION_WRITER" "$cmd" "$stdout_file" "$stderr_file" "$rc" "$capturable" "$shell_name" >/dev/null 2>&1
+        ) 9>"${HOME}/.config/tuxaide/session.lock"
+    fi
+
+    rm -f "$stdout_file" "$stderr_file"
+    return "$rc"
+}
 
 tuxaide() {
     [[ -z "${1:-}" ]] && {
@@ -9,6 +56,7 @@ tuxaide() {
         echo "   tuxaide on / off              — enable / disable hook"
         echo "   tuxaide status                — show status and mode"
         echo "   tuxaide mode [llm|smart|deep] — switch knowledge mode"
+        echo "   tuxaide run <cmd>             — run and capture shell context"
         echo "   tuxaide model <name>          — change Ollama model"
         echo "   tuxaide index <cmd>           — index a man page"
         echo "   tuxaide reindex               — re-index all man pages"
@@ -19,9 +67,14 @@ tuxaide() {
         on)      _LG_ON=true;  echo "🐧 TuxAide ENABLED" ;;
         off)     _LG_ON=false; echo "🐧 TuxAide DISABLED" ;;
         status)
-            local mode
+            local mode capture
             mode=$(python3 -c "import json,os; c=json.load(open(os.path.expanduser('~/.config/tuxaide/config.json'))); print(c.get('mode','llm').upper())" 2>/dev/null || echo "LLM")
-            [[ "$_LG_ON" == "true" ]] && echo "🐧 Status: ACTIVE | Mode: $mode" || echo "🐧 Status: INACTIVE"
+            capture=$(_tux_session_capture_enabled)
+            [[ "$_LG_ON" == "true" ]] && echo "🐧 Status: ACTIVE | Mode: $mode | Session capture: ${capture:-false} | Session file: ${_TUX_SESSION_FILE}" || echo "🐧 Status: INACTIVE"
+            ;;
+        run)
+            shift
+            _tux_run "$@"
             ;;
         model|modelo)
             local m="${2:-}"

@@ -442,7 +442,7 @@ resolve_source_dir() {
     if [[ -n "${BASH_SOURCE[0]:-}" ]]; then
         src="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     fi
-    if [[ -f "${src}/agent.py" && -f "${src}/hook.sh" && -f "${src}/uninstall.sh" ]]; then
+    if [[ -f "${src}/agent.py" && -f "${src}/hook.sh" && -f "${src}/uninstall.sh" && -f "${src}/session_writer.py" ]]; then
         echo "$src"
         return
     fi
@@ -490,6 +490,7 @@ install_agent() {
     "temperature": 0.1,
     "color": true,
     "mode": "${mode_val}",
+    "session_capture": true,
     "rag_top_k": 1,
     "rag_timeout": 8,
     "rag_db_path": "~/.config/tuxaide/vectordb"
@@ -499,6 +500,10 @@ JEOF
 
     fetch_component "hook.sh" "${CFG}/hook.sh" "$SRC_DIR" || err "Failed to fetch hook.sh"
     ok "Hook installed → ${CFG}/hook.sh"
+
+    fetch_component "session_writer.py" "${CFG}/session_writer.py" "$SRC_DIR" || err "Failed to fetch session_writer.py"
+    chmod +x "${CFG}/session_writer.py"
+    ok "Session writer installed → ${CFG}/session_writer.py"
 
     fetch_component "uninstall.sh" "${BIN}/tuxaide-uninstall" "$SRC_DIR" || err "Failed to fetch uninstall.sh"
     chmod +x "${BIN}/tuxaide-uninstall"

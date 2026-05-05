@@ -7,6 +7,7 @@ CFG_FILE  = os.path.expanduser("~/.config/tuxaide/config.json")
 CACHE_DIR = os.path.expanduser("~/.config/tuxaide/cache")
 LOG_DIR   = os.path.expanduser("~/.config/tuxaide/logs")
 PERF_LOG  = os.path.join(LOG_DIR, "perf.log")
+SESSION_FILE = os.path.expanduser("~/.config/tuxaide/session.json")
 
 DEFAULTS = {
     "ollama_url":   "http://localhost:11434",
@@ -16,6 +17,7 @@ DEFAULTS = {
     "temperature":  0.1,
     "color":        True,
     "mode":         "llm",    # "llm", "smart", "deep"
+    "session_capture": True,
     "rag_top_k":    1,
     "rag_db_path":  "~/.config/tuxaide/vectordb",
     "rag_timeout":  8,        # seconds before RAG fallback to LLM
@@ -134,6 +136,45 @@ def detect_lang(text):
         for kw in kws:
             if re.search(r'\b' + kw + r'\b', t): return lang
     return "English"
+
+def is_context_explain_query(text):
+    t = text.strip().lower()
+    patterns = [
+        "what does this mean", "why did this fail", "explain this output",
+        "explain this error", "porque deu este erro", "explica este output",
+        "por que deu este erro", "que erro foi este", "porque falhou",
+        "isto significa o quê", "o que significa isto"
+    ]
+    return any(p in t for p in patterns)
+
+def load_last_shell_context():
+    try:
+        with open(SESSION_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        run = data.get("last_shell_run")
+        if not isinstance(run, dict):
+            return None
+        return run
+    except Exception:
+        return None
+
+def build_contextual_question(q, run):
+    if not run:
+        return q
+    cmd = run.get("command", "")
+    rc = run.get("exit_code", "")
+    out = run.get("stdout", "")
+    err = run.get("stderr", "")
+    trunc = run.get("output_truncated", False)
+    extra = (
+        "\n\n[Session context: last shell run]\n"
+        f"Command: {cmd}\n"
+        f"Exit code: {rc}\n"
+        f"Output truncated: {trunc}\n"
+        f"STDOUT:\n{out}\n\n"
+        f"STDERR:\n{err}\n"
+    )
+    return q + extra
 
 # ── Normalisation & cache ─────────────────────────────────────────────
 def normalize(q):
@@ -450,7 +491,18 @@ def main():
         print(f"{C.D}  Try: sudo systemctl start ollama{C.Z}\n")
         sys.exit(0)
 
-    norm_q    = normalize(q)
+    effective_q = q
+    context_query = c.get("session_capture", False) and is_context_explain_query(q)
+    if context_query:
+        last_run = load_last_shell_context()
+        if last_run:
+            effective_q = build_contextual_question(q, last_run)
+        else:
+            msg = "No recent shell execution context found in this session. Run a command with: tuxaide run \"<command>\""
+            print(fmt(msg, c, "llm", False))
+            return
+
+    norm_q    = normalize(effective_q if context_query else q)
     ans_key   = cache_key(norm_q)
     t_embed   = 0.0
     t_rag     = 0.0
@@ -458,7 +510,7 @@ def main():
     cache_hit = False
 
     # ── Answer cache lookup ───────────────────────────────────────────
-    cached_answer = cache_get("answers", ans_key)
+    cached_answer = None if context_query else cache_get("answers", ans_key)
     if cached_answer:
         cache_hit = True
         answer    = cached_answer["answer"]
@@ -475,7 +527,10 @@ def main():
 
     spinner = Spinner().start()
 
-    if current_mode == "smart" and rag_available():
+    if context_query:
+        passages = []
+        act_mode = "llm"
+    elif current_mode == "smart" and rag_available():
         if should_use_rag(norm_q):
             detected_cmd = detect_command(norm_q)
             t0 = time.time()
@@ -508,13 +563,14 @@ def main():
 
     # ── LLM call ──────────────────────────────────────────────────────
     t_llm_start = time.time()
-    answer = ask_ollama(q, c, passages if passages else None)
+    answer = ask_ollama(effective_q, c, passages if passages else None)
     t_llm = time.time() - t_llm_start
 
     spinner.stop()
 
     # ── Cache the answer ──────────────────────────────────────────────
-    cache_set("answers", ans_key, {"answer": answer, "mode": act_mode})
+    if not context_query:
+        cache_set("answers", ans_key, {"answer": answer, "mode": act_mode})
 
     # ── Perf log ──────────────────────────────────────────────────────
     perf_log(norm_q, act_mode, t_embed, t_rag, t_llm, False)
