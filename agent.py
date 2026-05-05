@@ -147,6 +147,9 @@ def is_context_explain_query(text):
     ]
     return any(p in t for p in patterns)
 
+def default_context_query():
+    return "Explain the last shell command output and error in simple terms. Identify cause and suggest next step."
+
 def load_last_shell_context():
     try:
         with open(SESSION_FILE, "r", encoding="utf-8") as f:
@@ -433,6 +436,26 @@ def main():
     # --check: is this a question?
     if mode_arg == "--check":
         sys.exit(0 if is_q(" ".join(sys.argv[2:])) else 1)
+
+    # --explain-last: force contextual explanation from last shell run
+    if mode_arg == "--explain-last":
+        c = cfg()
+        if not ollama_ok(c):
+            print(f"\n{C.O}⚠ Ollama not available.{C.Z}")
+            print(f"{C.D}  Try: sudo systemctl start ollama{C.Z}\n")
+            return
+        last_run = load_last_shell_context()
+        if not last_run:
+            msg = "No recent shell execution context found in this session. Run a command with: tuxaide run \"<command>\""
+            print(fmt(msg, c, "llm", False))
+            return
+        user_q = " ".join(sys.argv[2:]).strip() or default_context_query()
+        effective_q = build_contextual_question(user_q, last_run)
+        spinner = Spinner().start()
+        answer = ask_ollama(effective_q, c, None)
+        spinner.stop()
+        print(fmt(answer, c, "llm", is_destructive(answer)))
+        return
 
     # mode: switch between llm, smart, deep (rag kept as alias for deep)
     if mode_arg == "mode":

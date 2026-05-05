@@ -16,6 +16,24 @@ _tux_is_interactive_cmd() {
     esac
 }
 
+_tux_is_followup_query() {
+    local line
+    line="$(printf '%s' "$*" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    case "$line" in
+        "what does this mean"*|"why did this fail"*|"explain this output"*|"explain this error"*|\
+        "porque deu este erro"*|"por que deu este erro"*|"que erro foi este"*|"porque falhou"*|\
+        "o que quer dizer isto"*|"o que significa isto"*|"isto significa o quê"*|"explica este output"*)
+            return 0 ;;
+    esac
+    return 1
+}
+
+_tux_should_handle_question_line() {
+    local line="$*"
+    [[ -z "$line" ]] && return 1
+    noglob "$_LG" --check "$line" >/dev/null 2>&1
+}
+
 _tux_run() {
     local cmd="$*"
     [[ -z "$cmd" ]] && { echo "Usage: tuxaide run <command>"; return 1; }
@@ -39,10 +57,28 @@ _tux_run() {
         capturable="true"
         _tux_is_interactive_cmd "$first_word" && capturable="false"
         shell_name="${SHELL##*/}"
-        (
-            flock -x 9
-            python3 "$_TUX_SESSION_WRITER" "$cmd" "$stdout_file" "$stderr_file" "$rc" "$capturable" "$shell_name" >/dev/null 2>&1
-        ) 9>"${HOME}/.config/tuxaide/session.lock"
+        if command -v flock >/dev/null 2>&1; then
+            (
+                flock -x 9
+                python3 "$_TUX_SESSION_WRITER" "$cmd" "$stdout_file" "$stderr_file" "$rc" "$capturable" "$shell_name" >/dev/null 2>&1
+            ) 9>"${HOME}/.config/tuxaide/session.lock"
+        else
+            local lock_dir="${HOME}/.config/tuxaide/session.lock.d"
+            local tries=0
+            local max_tries=3
+            while (( tries < max_tries )); do
+                if mkdir "$lock_dir" 2>/dev/null; then
+                    python3 "$_TUX_SESSION_WRITER" "$cmd" "$stdout_file" "$stderr_file" "$rc" "$capturable" "$shell_name" >/dev/null 2>&1
+                    rmdir "$lock_dir" 2>/dev/null
+                    break
+                fi
+                tries=$((tries + 1))
+                sleep 0.05
+            done
+            if (( tries >= max_tries )); then
+                python3 "$_TUX_SESSION_WRITER" "$cmd" "$stdout_file" "$stderr_file" "$rc" "$capturable" "$shell_name" >/dev/null 2>&1
+            fi
+        fi
     fi
 
     rm -f "$stdout_file" "$stderr_file"
@@ -104,8 +140,12 @@ command_not_found_handle() {
     local full_cmd
     full_cmd=$(HISTTIMEFORMAT="" history 1 2>/dev/null | sed 's/^ *[0-9]* *//')
     local question="${full_cmd:-$*}"
-    if "$_LG" --check "$question" 2>/dev/null; then
-        "$_LG" --ask "$question"
+    if _tux_is_followup_query "$question"; then
+        noglob "$_LG" --explain-last "$question"
+        return 0
+    fi
+    if _tux_should_handle_question_line "$question"; then
+        noglob "$_LG" --ask "$question"
         return 0
     fi
     echo "bash: $cmd: command not found" >&2
@@ -116,15 +156,22 @@ command_not_found_handle() {
 # In zsh, preexec runs BEFORE execution but AFTER the command is accepted.
 if [[ -n "${ZSH_VERSION:-}" ]]; then
     _lg_preexec() {
-        local cmd="$1"
-        [[ "$_LG_ON" != "true" ]] && return
-        "$_LG" --check "$cmd" 2>/dev/null && "$_LG" --ask "$cmd"
+        return
     }
     autoload -Uz add-zsh-hook 2>/dev/null
     add-zsh-hook preexec _lg_preexec 2>/dev/null
 
     command_not_found_handler() {
         local cmd="$1"
+        local line="$*"
+        if _tux_is_followup_query "$line"; then
+            noglob "$_LG" --explain-last "$line"
+            return 0
+        fi
+        if _tux_should_handle_question_line "$line"; then
+            noglob "$_LG" --ask "$line"
+            return 0
+        fi
         case "$cmd" in
             how|why|what|where|when|which|who|como|porque|qual|onde|\
             comment|pourquoi|quel|cómo|qué|wie|warum|was)
