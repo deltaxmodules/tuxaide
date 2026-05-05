@@ -155,6 +155,8 @@ command_not_found_handle() {
 # ── Zsh hook ───────────────────────────────────────────────────────
 # In zsh, preexec runs BEFORE execution but AFTER the command is accepted.
 if [[ -n "${ZSH_VERSION:-}" ]]; then
+    # Allow natural-language questions ending with '?' without glob errors.
+    setopt NO_NOMATCH 2>/dev/null
     _lg_preexec() {
         return
     }
