@@ -302,3 +302,53 @@ def test_followups_in_shell(sh, ollama):
     sh.run("tuxaide new")
     out = sh.run("and by size")                        # conversation closed: just a typo
     assert "TuxAide (" not in out
+
+
+# ── P8: doctor, config, model, update ────────────────────────────────
+
+def test_help_and_version(sh):
+    from conftest import load_module
+    version = load_module("tuxaide_version_check", "agent.py").__version__
+    assert f"TuxAide {version}" in sh.run("tuxaide")
+    assert f"TuxAide {version}" in sh.run("tuxaide --version")
+
+
+def test_config_change_applies_in_this_shell(sh):
+    assert "type ?" in sh.run("false")
+    sh.run("tuxaide config set failure_hint false")
+    assert "type ?" not in sh.run("false")
+    sh.run("tuxaide config reset failure_hint")
+    assert "type ?" in sh.run("false")
+
+
+def test_doctor_checks_the_handler(sh, ollama):
+    ollama.models = [{"name": "fake", "size": 1}]
+    out = sh.run("tuxaide doctor")
+    assert "TuxAide answers unknown commands in this shell" in out
+    handler = "command_not_found_handler" if sh.name == "zsh" else "command_not_found_handle"
+    sh.run(f"{handler}() {{ echo other; return 127; }}")      # e.g. oh-my-zsh's plugin
+    out = sh.run("tuxaide doctor")
+    assert "Another command-not-found handler" in out
+
+
+def test_model_offers_download(sh, ollama):
+    ollama.models = [{"name": "fake", "size": 1}]
+    fake_ollama = sh.home / "fakebin" / "ollama"
+    fake_ollama.write_text(f"#!/bin/sh\necho \"$@\" > '{sh.home}/pulled'\n")
+    fake_ollama.chmod(0o755)
+    sh.send("tuxaide model tiny:1b\r")
+    sh.read_until(r"Download it now with 'ollama pull tiny:1b'\? \[y/N\]")
+    sh.send("y")
+    out = sh.read_until(r"PROMPT> $")
+    assert "Model changed to: tiny:1b" in out
+    assert (sh.home / "pulled").read_text().strip() == "pull tiny:1b"
+    assert "tiny:1b" in sh.run('echo "model=$_TUX_MODEL"')           # the hook reloaded it
+
+
+def test_update_loads_the_new_hook(sh, github):
+    github.release("9.9.9", hook_extra="\n_tux_new_marker() { echo NEW-HOOK-LOADED; }\n")
+    sh.run(" ".join(f"export {k}='{v}';" for k, v in github.env.items()))
+    out = sh.run("tuxaide update")
+    assert "→ 9.9.9" in out and "New hook loaded" in out
+    assert "NEW-HOOK-LOADED" in sh.run("_tux_new_marker")
+    assert "TuxAide 9.9.9" in sh.run("tuxaide --version")

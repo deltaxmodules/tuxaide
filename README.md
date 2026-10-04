@@ -6,6 +6,7 @@
 <div align="center">
 
 [![CI](https://github.com/deltaxmodules/tuxaide/actions/workflows/ci.yml/badge.svg)](https://github.com/deltaxmodules/tuxaide/actions/workflows/ci.yml)
+[![Version](https://img.shields.io/badge/version-2.3.0-informational)](https://github.com/deltaxmodules/tuxaide/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Ollama](https://img.shields.io/badge/Powered%20by-Ollama-blue)](https://ollama.com)
 [![Shell: bash/zsh](https://img.shields.io/badge/Shell-bash%20%7C%20zsh-lightgrey)](#compatibility)
@@ -125,7 +126,7 @@ Command-specific → local documentation (man pages)
 
 ---
 
-## Response speed (v2.1)
+## Response speed
 
 | Question type      | Example                          | Speed        |
 | ------------------ | -------------------------------- | ------------ |
@@ -184,7 +185,14 @@ tuxaide run "ls /missing-path"
 tuxaide new
 tuxaide history
 tuxaide system
-tuxaide model llama3.2
+tuxaide model              # list installed models
+tuxaide model llama3.2     # switch (offers to download it)
+tuxaide config             # show settings
+tuxaide config set typo_suggest false
+tuxaide doctor
+tuxaide update
+tuxaide cache clear
+tuxaide --version
 
 tuxaide mode smart
 tuxaide mode deep
@@ -201,7 +209,9 @@ tuxaide-uninstall
 
 ### Configuration
 
-Settings live in `~/.config/tuxaide/config.json`. Reinstalling keeps your existing values.
+Settings live in `~/.config/tuxaide/config.json`. Reinstalling or updating keeps your existing values.
+Change them with `tuxaide config set <key> <value>` (values are checked, and the change applies
+in the current terminal too) or `tuxaide config reset <key>`; `tuxaide config` lists them all.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -218,6 +228,40 @@ Settings live in `~/.config/tuxaide/config.json`. Reinstalling keeps your existi
 Smart RAG's Python dependencies (ChromaDB) are installed in TuxAide's own virtualenv at `~/.local/share/tuxaide/venv`, never in your system Python, so no `pip` command is needed. `tuxaide-uninstall` removes it.
 
 ---
+
+## Something not working? `tuxaide doctor`
+
+```
+$ tuxaide doctor
+🐧 TuxAide 2.3.0 — doctor
+   Ubuntu 24.04 LTS x86_64 · Python 3.12.3 · shell bash
+
+  ✓ Settings: ~/.config/tuxaide/config.json
+  ✗ Ollama isn't answering at http://localhost:11434
+    → sudo systemctl start ollama
+  · Mode LLM: the man-page knowledge base isn't used
+  ✓ Hook in ~/.bashrc
+  ✓ TuxAide answers unknown commands in this shell
+
+1 problem(s), 0 warning(s). Run the commands after → to fix them.
+```
+
+It checks Ollama, the model, the embedding model and ChromaDB (in Smart/Deep mode),
+the man-page index, the hook in your shell (and whether another command-not-found
+handler, like oh-my-zsh's, took its place), your `PATH` and free memory. Every
+problem comes with the command that fixes it, for your system. It exits with 1 when
+something is broken, so it works in scripts too. Please paste its output in bug reports.
+
+## Updating
+
+```bash
+tuxaide update --check    # is there a newer release?
+tuxaide update            # download it, keeping settings, history and cache
+```
+
+TuxAide only contacts GitHub when you run `tuxaide update` — it never checks for
+updates on its own. The new files are downloaded and checked before anything is
+replaced, and the new hook is loaded into the current terminal.
 
 ## Answers for your system
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ══════════════════════════════════════════════════════════════════════
-#  TuxAide v2.1 — Complete Installer with Smart RAG
+#  TuxAide — Complete Installer with Smart RAG
 #  https://github.com/deltaxmodules/tuxaide
 #
 #  One-liner install:
@@ -9,18 +9,10 @@
 #  What it does:
 #    1.  Detects distro, architecture, RAM and GPU
 #    2.  Shows system diagnosis and asks for confirmation
-#    3.  Installs all v1 components (Ollama, model, shell hook)
+#    3.  Installs the core components (Ollama, model, shell hook)
 #    4.  Asks if user wants RAG mode (man page knowledge base)
 #    5.  If yes: installs ChromaDB, embedding model, indexes man pages
 #    6.  Activates immediately — no terminal restart needed
-#
-#  v2.1 changes (smart RAG):
-#    - Smart router: RAG only when the question needs local docs
-#    - Cache: embeddings and answers cached to disk (MD5 key)
-#    - RAG filtered by detected command (faster, less noise)
-#    - top_k reduced to 1 in smart mode (300 tokens max)
-#    - Silent perf log at ~/.config/tuxaide/logs/perf.log
-#    - Destructive command warning shown before code blocks
 #
 #  To disable RAG:   tuxaide mode llm
 #  To re-enable RAG: tuxaide mode smart
@@ -28,6 +20,9 @@
 # ══════════════════════════════════════════════════════════════════════
 
 set -euo pipefail
+
+# Must match __version__ in agent.py (tests/test_version.py checks).
+TUXAIDE_VERSION="2.3.0"
 
 # ── Colours ───────────────────────────────────────────────────────────
 R="\033[0m"; BOLD="\033[1m"; DIM="\033[2m"
@@ -38,7 +33,7 @@ banner() {
     clear 2>/dev/null || true
     echo ""
     echo -e "${CY}${BOLD}╔══════════════════════════════════════════════════════╗${R}"
-    echo -e "${CY}${BOLD}║   🐧  TuxAide v2.1 — Complete Installer             ║${R}"
+    echo -e "${CY}${BOLD}║   🐧  TuxAide ${TUXAIDE_VERSION} — Complete Installer            ║${R}"
     echo -e "${CY}${BOLD}║   Local AI assistant with Smart RAG                 ║${R}"
     echo -e "${CY}${BOLD}╚══════════════════════════════════════════════════════╝${R}"
     echo ""
@@ -165,22 +160,22 @@ diagnose_system() {
     printf "  ${CY}│${R}  %-25s %-28s${CY}│${R}\n" "AI model:" "$MODEL ($MODEL_SIZE)"
     echo -e "  ${CY}${BOLD}├─────────────────────────────────────────────────────┤${R}"
 
-    # v1 assessment
+    # LLM mode assessment
     if [[ $RAM_GB -ge 5 && $DISK_FREE_GB -ge 6 ]]; then
-        echo -e "  ${CY}│${R}  ${GR}✓${R} TuxAide v1 (LLM mode)    ${GR}READY${R}                    ${CY}│${R}"
+        echo -e "  ${CY}│${R}  ${GR}✓${R} LLM mode                 ${GR}READY${R}                    ${CY}│${R}"
     else
-        echo -e "  ${CY}│${R}  ${RD}✗${R} TuxAide v1 (LLM mode)    ${RD}INSUFFICIENT RESOURCES${R}   ${CY}│${R}"
+        echo -e "  ${CY}│${R}  ${RD}✗${R} LLM mode                 ${RD}INSUFFICIENT RESOURCES${R}   ${CY}│${R}"
     fi
 
     # RAG assessment
     if [[ "$RAG_CAPABLE" == "true" && $DISK_FREE_GB -ge 8 ]]; then
-        echo -e "  ${CY}│${R}  ${GR}✓${R} TuxAide v2.1 (Smart RAG) ${GR}AVAILABLE${R}                ${CY}│${R}"
+        echo -e "  ${CY}│${R}  ${GR}✓${R} Smart RAG                ${GR}AVAILABLE${R}                ${CY}│${R}"
         RAG_AVAILABLE=true
     else
         if [[ "$RAG_CAPABLE" == "false" ]]; then
-            echo -e "  ${CY}│${R}  ${YL}⚠${R} TuxAide v2.1 (Smart RAG) ${YL}RAM < 5 GB — not recommended${R} ${CY}│${R}"
+            echo -e "  ${CY}│${R}  ${YL}⚠${R} Smart RAG                ${YL}RAM < 5 GB — not recommended${R} ${CY}│${R}"
         else
-            echo -e "  ${CY}│${R}  ${YL}⚠${R} TuxAide v2.1 (Smart RAG) ${YL}DISK SPACE LOW${R}           ${CY}│${R}"
+            echo -e "  ${CY}│${R}  ${YL}⚠${R} Smart RAG                ${YL}DISK SPACE LOW${R}           ${CY}│${R}"
         fi
         RAG_AVAILABLE=false
     fi
@@ -221,7 +216,7 @@ ask_rag() {
 
     echo ""
     echo -e "  ${BOLD}What is Smart RAG mode?${R}"
-    echo -e "  TuxAide v2.1 can index the man pages installed on this system"
+    echo -e "  TuxAide can index the man pages installed on this system"
     echo -e "  and use them as a knowledge base — but only when the question"
     echo -e "  actually needs local documentation. This means:"
     echo ""
@@ -237,7 +232,7 @@ ask_rag() {
 
     if [[ "$RAG_AVAILABLE" == "false" ]]; then
         warn "RAG mode is not recommended for this system (insufficient RAM or disk)."
-        warn "Installing in LLM-only mode (v1 behaviour)."
+        warn "Installing in LLM-only mode."
         INSTALL_RAG=false
         return
     fi
@@ -250,7 +245,7 @@ ask_rag() {
         ok "Smart RAG mode will be installed"
     else
         INSTALL_RAG=false
-        info "Skipping RAG — installing LLM mode only (v1 behaviour)"
+        info "Skipping RAG — installing LLM mode only"
         info "Enable later with: tuxaide mode smart"
     fi
 }
@@ -659,43 +654,22 @@ activate_shell() {
 # ═══════════════════════════════════════════════════════════════════════
 final_check() {
     step "Final check"
-
-    local ok_count=0 fail_count=0
-
-    _chk() {
-        local desc="$1" cmd="$2"
-        if eval "$cmd" &>/dev/null; then ok "$desc"; ok_count=$((ok_count+1))
-        else warn "$desc  ← FAILED"; fail_count=$((fail_count+1)); fi
-    }
-
-    _chk "Ollama installed"         "command -v ollama"
-    _chk "Ollama responding"        "curl -s http://localhost:11434/api/tags"
-    _chk "Model $MODEL available"   "ollama list | grep -q '${MODEL%:*}'"
-    _chk "tuxaide binary"           "test -x ${HOME}/.local/bin/tuxaide"
-    _chk "Hook in shell RC"         "grep -q tuxaide/hook.sh ${HOME}/.bashrc 2>/dev/null || grep -q tuxaide/hook.sh ${HOME}/.zshrc 2>/dev/null"
-
-    if [[ "$INSTALL_RAG" == "true" ]]; then
-        _chk "nomic-embed-text model" "ollama list | grep -q nomic-embed-text"
-        _chk "ChromaDB installed"     "'${VENV}/bin/python' -c 'import chromadb'"
-        _chk "Vector DB exists"       "test -d ${HOME}/.config/tuxaide/vectordb"
-    fi
-
-    echo ""
-    if [[ $fail_count -eq 0 ]]; then
-        echo -e "${GR}${BOLD}  ✓ Everything installed! ($ok_count checks passed)${R}"
+    # The same checks as `tuxaide doctor`, which users can run again any time.
+    if "${HOME}/.local/bin/tuxaide" doctor; then
+        echo -e "${GR}${BOLD}  ✓ Everything installed!${R}"
     else
-        echo -e "${YL}  ⚠ $ok_count ok, $fail_count with issues — check warnings above${R}"
+        echo -e "${YL}  ⚠ Some checks failed — the lines with → say how to fix them${R}"
     fi
     return 0
 }
 
 print_summary() {
-    local mode_label="LLM only (v1 behaviour)"
+    local mode_label="LLM only"
     [[ "$INSTALL_RAG" == "true" ]] && mode_label="Smart RAG (uses local docs only when needed)"
 
     echo ""
     echo -e "${CY}${BOLD}╔══════════════════════════════════════════════════════╗${R}"
-    echo -e "${CY}${BOLD}║   🐧  TuxAide v2.1 installed and ready!             ║${R}"
+    echo -e "${CY}${BOLD}║   🐧  TuxAide ${TUXAIDE_VERSION} installed and ready!            ║${R}"
     echo -e "${CY}${BOLD}╚══════════════════════════════════════════════════════╝${R}"
     echo ""
     echo -e "  ${YL}${BOLD}⚡ Required — run this now to activate:${R}"
@@ -719,6 +693,8 @@ print_summary() {
     echo -e "  ${CY}tuxaide mode llm${R}   — LLM only, no man pages"
     echo -e "  ${CY}tuxaide status${R}     — show current mode"
     echo -e "  ${CY}tuxaide --timing${R}   — show recent query performance"
+    echo -e "  ${CY}tuxaide doctor${R}     — check that everything works"
+    echo -e "  ${CY}tuxaide update${R}     — update to the latest release"
     if [[ "$INSTALL_RAG" == "true" ]]; then
         echo ""
         echo -e "  ${BOLD}Re-index after system updates:${R}"

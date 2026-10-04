@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""TuxAide v2.1 — Local AI assistant for Linux terminal with Smart RAG."""
-import sys, os, re, json, hashlib, time, urllib.request, urllib.error
+"""TuxAide — Local AI assistant for Linux terminal with Smart RAG."""
+import sys, os, re, json, hashlib, time, urllib.request, urllib.error, urllib.parse
 import textwrap, shutil, threading, itertools, subprocess, base64, select, shlex, tempfile
 
 CFG_FILE  = os.path.expanduser("~/.config/tuxaide/config.json")
@@ -10,6 +10,12 @@ PERF_LOG  = os.path.join(LOG_DIR, "perf.log")
 SESSION_FILE = os.path.expanduser("~/.config/tuxaide/session.json")
 PENDING_DIR  = os.path.expanduser("~/.config/tuxaide/pending")
 HISTORY_FILE = os.path.expanduser("~/.config/tuxaide/history.json")
+HOOK_FILE    = os.path.expanduser("~/.config/tuxaide/hook.sh")
+BIN_DIR      = os.path.expanduser("~/.local/bin")
+
+# The one place the version lives. install.sh and the README must match it
+# (tests/test_version.py checks).
+__version__ = "2.3.0"
 
 DEFAULTS = {
     "ollama_url":   "http://localhost:11434",
@@ -53,15 +59,58 @@ def _parse_model(v):
         raise ValueError("model names may only contain letters, digits and . _ : / -")
     return v
 
+def _parse_int(lo, hi):
+    def parse(v):
+        try:
+            n = int(v)
+        except ValueError:
+            raise ValueError("expected a whole number") from None
+        if not lo <= n <= hi:
+            raise ValueError(f"expected a number from {lo} to {hi}")
+        return n
+    return parse
+
+def _parse_float(lo, hi):
+    def parse(v):
+        try:
+            n = float(v)
+        except ValueError:
+            raise ValueError("expected a number") from None
+        if not lo <= n <= hi:
+            raise ValueError(f"expected a number from {lo} to {hi}")
+        return n
+    return parse
+
+def _parse_url(v):
+    if not re.fullmatch(r"https?://[^\s/]+(/\S*)?", v):
+        raise ValueError("expected a URL like http://localhost:11434")
+    return v.rstrip("/")
+
+def _parse_duration(v):
+    # Ollama's keep_alive: "30s", "10m", "1h", "0" (unload at once), "-1" (keep forever)
+    if not re.fullmatch(r"-1|0|\d+[smh]", v):
+        raise ValueError("expected a duration like 30s, 10m or 1h (0 = unload at once, -1 = never)")
+    return v
+
+# Settings `tuxaide config set` (and `--set`) may change, with their validators.
 SETTABLE = {
     "enabled":         _parse_bool,
+    "mode":            _parse_choice("llm", "smart", "deep"),
+    "model":           _parse_model,
+    "embed_model":     _parse_model,
+    "ollama_url":      _parse_url,
     "session_capture": _parse_bool,
     "color":           _parse_bool,
-    "model":           _parse_model,
     "prewarm":         _parse_choice("off", "once", "always"),
+    "keep_alive":      _parse_duration,
+    "temperature":     _parse_float(0, 2),
+    "rag_timeout":     _parse_int(1, 120),
+    "cache_ttl_days":  _parse_int(0, 3650),
     "action_menu":     _parse_bool,
     "failure_hint":    _parse_bool,
     "typo_suggest":    _parse_bool,
+    "followup_window": _parse_int(0, 86400),
+    "followup_turns":  _parse_int(0, 10),
     "system_context":  _parse_bool,
 }
 
@@ -87,6 +136,11 @@ def save_cfg(updates):
 class C:
     Z="\033[0m"; B="\033[1m"; D="\033[2m"
     G="\033[32m"; Y="\033[36m"; R="\033[33m"; O="\033[31m"; RD="\033[31m"
+
+    @classmethod
+    def off(cls):
+        for k in ("Z", "B", "D", "G", "Y", "R", "O", "RD"):
+            setattr(cls, k, "")
 
 class Spinner:
     _frames = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
@@ -764,7 +818,7 @@ def stream_ollama(q, c, passages=None, history=None):
         except Exception: pass
         raise OllamaError(detail or f"HTTP {e.code}")
     except urllib.error.URLError:
-        raise OllamaError("Ollama not available. Try: sudo systemctl start ollama")
+        raise OllamaError(f"Ollama not available. {ollama_down_hint(c)}")
     except Exception as e:
         raise OllamaError(str(e) or e.__class__.__name__)
 
@@ -1195,10 +1249,533 @@ def ollama_ok(c):
             return r.status == 200
     except Exception: return False
 
+def _ollama_get(c, path, timeout=3):
+    """GET an Ollama endpoint as JSON, or None when it doesn't answer."""
+    try:
+        with urllib.request.urlopen(f"{c['ollama_url']}{path}", timeout=timeout) as r:
+            return json.loads(r.read())
+    except Exception:
+        return None
+
+def ollama_models(c):
+    """Installed models as [{"name", "size", ...}], or None when Ollama doesn't answer."""
+    tags = _ollama_get(c, "/api/tags")
+    return None if tags is None else tags.get("models") or []
+
+def find_model(name, models):
+    """The installed model called `name` ("llama3.2" means "llama3.2:latest"), or None."""
+    for m in models:
+        if m.get("name") in (name, f"{name}:latest"):
+            return m
+    return None
+
+def ollama_is_local(c):
+    host = urllib.parse.urlparse(c["ollama_url"]).hostname or ""
+    return host in ("localhost", "127.0.0.1", "::1")
+
+def ollama_start_hint():
+    """The command that starts Ollama on this system."""
+    if sys.platform == "darwin":
+        if os.path.isdir("/Applications/Ollama.app"):
+            return "open -a Ollama"
+        return "brew services start ollama" if shutil.which("brew") else "ollama serve"
+    if os.path.isdir("/run/systemd/system"):
+        return "sudo systemctl start ollama"
+    return "ollama serve > /tmp/ollama.log 2>&1 &"
+
+def ollama_install_hint():
+    if sys.platform == "darwin":
+        return "brew install ollama" if shutil.which("brew") else "download it from https://ollama.com/download"
+    return "curl -fsSL https://ollama.com/install.sh | sh"
+
+def ollama_down_hint(c):
+    """What to try when Ollama doesn't answer, for this system and this ollama_url."""
+    if not ollama_is_local(c):
+        return f"Check that Ollama is running at {c['ollama_url']}"
+    if not shutil.which("ollama"):
+        return f"Ollama isn't installed: {ollama_install_hint()}"
+    return f"Try: {ollama_start_hint()}"
+
+def print_ollama_down(c):
+    print(f"\n{C.O}⚠ Ollama not available.{C.Z}")
+    print(f"{C.D}  {ollama_down_hint(c)}{C.Z}\n")
+
+def human_size(n):
+    if n >= 1024 ** 3:
+        return f"{n / 1024 ** 3:.1f} GB"
+    return f"{n / 1024 ** 2:.0f} MB"
+
+# ── help / version ────────────────────────────────────────────────────
+HELP = """\
+   tuxaide <question>            — ask a question
+   ?  [question]                 — explain why the last command failed
+   tuxaide new                   — start a new conversation (forget follow-ups)
+   tuxaide history               — show your recent questions
+   tuxaide on / off              — enable / disable the hook
+   tuxaide status                — show status and mode
+   tuxaide doctor                — check that everything works, with fixes
+   tuxaide config [set KEY VAL]  — show or change settings
+   tuxaide model [name]          — list models, or switch to another one
+   tuxaide mode [llm|smart|deep] — switch knowledge mode
+   tuxaide system                — show what TuxAide tells the model about this machine
+   tuxaide run <cmd>             — run and capture shell context
+   tuxaide index <cmd>           — index a man page
+   tuxaide reindex               — re-index all man pages
+   tuxaide cache [clear]         — show / clear cached answers
+   tuxaide update [--check]      — update to the latest release
+   tuxaide --timing              — show recent query performance
+   tuxaide --version             — show the version"""
+
+def print_help():
+    print(f"🐧 TuxAide {__version__}")
+    print(HELP)
+
+# ── config ────────────────────────────────────────────────────────────
+def set_mode(new_mode):
+    """Switch llm / smart / deep (with their RAG settings). Returns an exit code."""
+    new_mode = new_mode.lower()
+    if new_mode == "rag": new_mode = "deep"  # backwards compat
+    if new_mode not in ("llm", "smart", "deep"):
+        print("Usage: tuxaide mode [llm|smart|deep]")
+        return 2
+    if new_mode in ("smart", "deep") and not rag_available():
+        print(f"{C.O}⚠ RAG requires chromadb, which isn't installed.{C.Z}")
+        print(f"{C.D}  Re-run the TuxAide installer and answer Y to Smart RAG.{C.Z}")
+        return 1
+    top_k = 1 if new_mode == "smart" else 3
+    max_tokens = 300 if new_mode in ("llm", "smart") else 600
+    save_cfg({"mode": new_mode, "rag_top_k": top_k, "max_tokens": max_tokens})
+    return 0
+
+def _config_text(v):
+    return v if isinstance(v, str) else json.dumps(v)
+
+def set_setting(key, raw):
+    """Validate and save one setting. Returns an exit code; prints why on error."""
+    if key not in SETTABLE:
+        if key in DEFAULTS:
+            print(f"{key} can't be changed with tuxaide config; edit {CFG_FILE}")
+        else:
+            print(f"Unknown setting: {key}. See the list with: tuxaide config")
+        return 2
+    try:
+        value = SETTABLE[key](raw)
+    except ValueError as e:
+        print(f"Invalid value for {key}: {e}")
+        return 2
+    if key == "mode":
+        return set_mode(value)
+    save_cfg({key: value})
+    return 0
+
+def config_cmd(args):
+    if not args or args == ["list"]:
+        c = cfg()
+        print(f"🐧 Settings ({CFG_FILE.replace(os.path.expanduser('~'), '~', 1)})")
+        for key in list(DEFAULTS) + sorted(set(c) - set(DEFAULTS)):
+            note = "" if key in SETTABLE else "  (edit the file)"
+            if key in DEFAULTS and c[key] != DEFAULTS[key]:
+                note = f"  (default: {_config_text(DEFAULTS[key])})" + note
+            print(f"  {key:<16} {_config_text(c[key])}" + (f"{C.D}{note}{C.Z}" if note else ""))
+        print(f"{C.D}   Change one with: tuxaide config set <key> <value>{C.Z}")
+        return 0
+    if args[0] == "get" and len(args) == 2:
+        c = cfg()
+        if args[1] not in c:
+            print(f"Unknown setting: {args[1]}")
+            return 2
+        print(_config_text(c[args[1]]))
+        return 0
+    if args[0] == "set" and len(args) >= 3:
+        key, raw = args[1], " ".join(args[2:])
+        rc = set_setting(key, raw)
+        if rc == 0:
+            print(f"🐧 {key} = {_config_text(cfg()[key])}")
+        return rc
+    if args[0] == "reset" and len(args) == 2 and args[1] in SETTABLE:
+        key = args[1]
+        if key == "mode":
+            return set_mode(DEFAULTS["mode"])
+        save_cfg({key: DEFAULTS[key]})
+        print(f"🐧 {key} = {_config_text(DEFAULTS[key])} (default)")
+        return 0
+    print("Usage: tuxaide config                   — show all settings\n"
+          "       tuxaide config get <key>\n"
+          "       tuxaide config set <key> <value>\n"
+          "       tuxaide config reset <key>       — back to the default")
+    return 2
+
+# ── model ─────────────────────────────────────────────────────────────
+def pull_model(name, c):
+    """Offer to download a model with `ollama pull`. True when it's there afterwards."""
+    if not shutil.which("ollama"):
+        print(f"{C.D}  Download it where Ollama runs: ollama pull {name}{C.Z}")
+        return False
+    if not ask_yes(f"Download it now with 'ollama pull {name}'? [y/N] "):
+        print(f"{C.D}  Download it with: ollama pull {name}{C.Z}")
+        return False
+    env = {**os.environ, "OLLAMA_HOST": c["ollama_url"]}
+    try:
+        return subprocess.run(["ollama", "pull", name], env=env).returncode == 0
+    except (OSError, KeyboardInterrupt):
+        return False
+
+def model_cmd(args):
+    c = cfg()
+    models = ollama_models(c)
+    if not args:
+        if models is None:
+            print_ollama_down(c)
+            return 1
+        current = find_model(c["model"], models)
+        print(f"🐧 Models in Ollama ({c['ollama_url']}):")
+        for m in sorted(models, key=lambda m: m.get("name", "")):
+            mark = f"{C.G}*{C.Z}" if m is current else " "
+            print(f"  {mark} {m.get('name', ''):<32} {human_size(m.get('size', 0))}")
+        if not models:
+            print(f"  (none yet — download one with: ollama pull {DEFAULTS['model']})")
+        if not current:
+            print(f"{C.O}  ⚠ The configured model, {c['model']}, isn't downloaded.{C.Z}")
+        print(f"{C.D}   Switch with: tuxaide model <name>{C.Z}")
+        return 0
+    name = args[0]
+    try:
+        _parse_model(name)
+    except ValueError as e:
+        print(f"Invalid model name: {e}")
+        return 2
+    if models is None:
+        print(f"{C.O}⚠ Ollama isn't answering, so TuxAide couldn't check that {name} is downloaded.{C.Z}")
+    elif not find_model(name, models):
+        print(f"🐧 {name} isn't downloaded yet.")
+        if not pull_model(name, c):
+            print("   Model not changed.")
+            return 1
+    save_cfg({"model": name})
+    print(f"🐧 Model changed to: {name}")
+    return 0
+
+# ── cache ─────────────────────────────────────────────────────────────
+def cache_cmd(args):
+    kinds = ("answers", "embeddings")
+    def files(kind):
+        d = os.path.join(CACHE_DIR, kind)
+        return [os.path.join(d, f) for f in os.listdir(d)] if os.path.isdir(d) else []
+    if not args:
+        for kind in kinds:
+            fs = files(kind)
+            size = sum(os.path.getsize(f) for f in fs)
+            print(f"🐧 {kind:<10} {len(fs):>5} entries  {human_size(size)}")
+        print(f"{C.D}   Clear with: tuxaide cache clear{C.Z}")
+        return 0
+    if args == ["clear"]:
+        counts = []
+        for kind in kinds:
+            counts.append(len(files(kind)))
+            shutil.rmtree(os.path.join(CACHE_DIR, kind), ignore_errors=True)
+        print(f"🐧 Cache cleared ({counts[0]} answers, {counts[1]} embeddings).")
+        return 0
+    print("Usage: tuxaide cache [clear]")
+    return 2
+
+# ── doctor ────────────────────────────────────────────────────────────
+def available_memory():
+    """Bytes of memory free for a model, or None when unknown."""
+    try:
+        if sys.platform == "darwin":
+            out = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=3).stdout
+            page = int(re.search(r"page size of (\d+)", out).group(1))
+            pages = {k.strip(): int(v.strip(" .")) for k, v in re.findall(r"^(Pages [^:]+):\s+(\d+)", out, re.M)}
+            return page * sum(pages.get(k, 0) for k in ("Pages free", "Pages inactive", "Pages speculative"))
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except Exception:
+        pass
+    return None
+
+def shell_rc_files():
+    return [os.path.expanduser(f"~/{n}") for n in (".zshrc", ".bashrc")]
+
+class Doctor:
+    def __init__(self):
+        self.failed = self.warned = 0
+
+    def _line(self, mark, color, msg, fix=None):
+        print(f"  {color}{mark}{C.Z} {msg}")
+        if fix: print(f"    {C.D}→ {fix}{C.Z}")
+
+    def ok(self, msg):            self._line("✓", C.G, msg)
+    def info(self, msg):          self._line("·", C.D, msg)
+    def warn(self, msg, fix=None):
+        self.warned += 1
+        self._line("⚠", C.R, msg, fix)
+    def fail(self, msg, fix=None):
+        self.failed += 1
+        self._line("✗", C.O, msg, fix)
+
+def doctor():
+    """Check the whole setup; every problem comes with the command that fixes it.
+    Exit code 1 when something is broken, so it also works in scripts and CI."""
+    import platform
+    d = Doctor()
+    home = os.path.expanduser("~")
+    short = lambda p: p.replace(home, "~", 1)  # noqa: E731
+    sysinfo = detect_system()
+    print(f"🐧 TuxAide {__version__} — doctor")
+    print(f"   {sysinfo.get('os', '')} {sysinfo.get('arch', '')} · Python {platform.python_version()}"
+          f" · shell {os.environ.get('TUXAIDE_SHELL') or os.path.basename(os.environ.get('SHELL', '')) or '?'}")
+    print()
+
+    # Settings
+    if not os.path.exists(CFG_FILE):
+        d.warn(f"No settings file ({short(CFG_FILE)}): using the defaults", "re-run the installer")
+    else:
+        try:
+            with open(CFG_FILE) as f:
+                raw = json.load(f)
+            bad = []
+            for key, value in raw.items():
+                if key in SETTABLE:
+                    try:
+                        SETTABLE[key](value if isinstance(value, str) else json.dumps(value))
+                    except ValueError as e:
+                        bad.append((key, value, e))
+            if bad:
+                for key, value, e in bad:
+                    d.warn(f"Setting {key} = {json.dumps(value)} isn't valid ({e})",
+                           f"tuxaide config reset {key}")
+            else:
+                d.ok(f"Settings: {short(CFG_FILE)}")
+        except Exception as e:
+            d.fail(f"{short(CFG_FILE)} isn't valid JSON ({e})",
+                   f"fix it, or start from the defaults: rm {short(CFG_FILE)} and re-run the installer")
+    c = cfg()
+    if not c.get("enabled", True):
+        d.warn("TuxAide is turned off", "tuxaide on")
+
+    # Ollama and the model
+    models = ollama_models(c)
+    model = c["model"]
+    m = None
+    if models is None:
+        if ollama_is_local(c) and not shutil.which("ollama"):
+            d.fail("Ollama isn't installed", ollama_install_hint())
+        elif ollama_is_local(c):
+            d.fail(f"Ollama isn't answering at {c['ollama_url']}", ollama_start_hint())
+        else:
+            d.fail(f"Ollama isn't answering at {c['ollama_url']}",
+                   "start it on that machine, or use the local one: "
+                   f"tuxaide config set ollama_url {DEFAULTS['ollama_url']}")
+    else:
+        version = (_ollama_get(c, "/api/version") or {}).get("version")
+        d.ok(f"Ollama {version + ' ' if version else ''}answering at {c['ollama_url']}")
+        m = find_model(model, models)
+        if m:
+            d.ok(f"Model {model} downloaded ({human_size(m.get('size', 0))})")
+        else:
+            d.fail(f"Model {model} isn't downloaded",
+                   f"ollama pull {model}   (or pick an installed one: tuxaide model)")
+
+    # Smart RAG
+    mode = c.get("mode", "llm")
+    if mode in ("smart", "deep"):
+        embed_model = c.get("embed_model", "nomic-embed-text")
+        if models is not None:
+            if find_model(embed_model, models):
+                d.ok(f"Embedding model {embed_model} downloaded")
+            else:
+                d.fail(f"Embedding model {embed_model} isn't downloaded (needed by mode {mode})",
+                       f"ollama pull {embed_model}")
+        if not rag_available():
+            d.fail(f"Mode is {mode}, but ChromaDB isn't installed",
+                   "re-run the installer and answer Y to Smart RAG, or: tuxaide mode llm")
+        else:
+            db_path = os.path.expanduser(c.get("rag_db_path", "~/.config/tuxaide/vectordb"))
+            count = 0
+            try:
+                import chromadb
+                if os.path.exists(db_path):
+                    count = chromadb.PersistentClient(path=db_path).get_collection("tuxaide_manpages").count()
+            except Exception:
+                count = 0
+            if count:
+                d.ok(f"Man-page index: {count} passages")
+            else:
+                d.warn("The man-page index is empty", "tuxaide reindex")
+    else:
+        d.info(f"Mode {mode.upper()}: the man-page knowledge base isn't used")
+
+    # Shell integration
+    hooked = []
+    for rc in shell_rc_files():
+        try:
+            with open(rc, errors="replace") as f:
+                if "tuxaide/hook.sh" in f.read():
+                    hooked.append(short(rc))
+        except OSError:
+            pass
+    shell = os.environ.get("TUXAIDE_SHELL") or os.path.basename(os.environ.get("SHELL", "")) or "bash"
+    if hooked:
+        d.ok(f"Hook in {', '.join(hooked)}")
+    else:
+        d.fail("The hook isn't in ~/.zshrc or ~/.bashrc",
+               f"echo 'source \"$HOME/.config/tuxaide/hook.sh\"  # TuxAide' >> ~/.{shell}rc")
+    if not os.path.exists(HOOK_FILE):
+        d.fail(f"{short(HOOK_FILE)} is missing", "re-run the installer")
+    if not os.environ.get("TUXAIDE_SHELL_PID"):
+        d.warn("The hook isn't loaded in this terminal", f"source ~/.{shell}rc   (or open a new terminal)")
+    handler = os.environ.get("TUXAIDE_HANDLER", "")
+    if handler == "ours":
+        d.ok("TuxAide answers unknown commands in this shell")
+    elif handler == "other":
+        d.fail("Another command-not-found handler replaced TuxAide's in this shell "
+               "(e.g. oh-my-zsh's command-not-found plugin)",
+               f"move the TuxAide line to the end of ~/.{shell}rc")
+    elif handler == "none":
+        d.fail("No command-not-found handler in this shell", f"source ~/.{shell}rc")
+    elif handler == "old-bash":
+        d.fail(f"bash {os.environ.get('BASH_VERSION', '')} is too old for TuxAide's hook (needs bash 4+)",
+               "use zsh (chsh -s /bin/zsh), or a newer bash: brew install bash")
+    if BIN_DIR not in os.environ.get("PATH", "").split(os.pathsep):
+        d.warn("~/.local/bin isn't on your PATH (tuxaide-index and tuxaide-uninstall need it)",
+               f"echo 'export PATH=\"$HOME/.local/bin:$PATH\"' >> ~/.{shell}rc")
+
+    # Memory for the model
+    if m and m.get("size"):
+        loaded = any(p.get("name") == m.get("name") for p in (_ollama_get(c, "/api/ps") or {}).get("models", []))
+        free = available_memory()
+        need = m["size"]
+        if loaded:
+            d.ok(f"Model {model} is loaded in memory")
+        elif free is not None and free < need * 1.2:
+            d.warn(f"Only {human_size(free)} of memory free; {model} needs about {human_size(need)}",
+                   "close some programs, or switch to a smaller model: tuxaide model qwen2.5:3b")
+        elif free is not None:
+            d.ok(f"Memory: {human_size(free)} free, {model} needs about {human_size(need)}")
+
+    print()
+    if d.failed:
+        print(f"{d.failed} problem(s), {d.warned} warning(s). Run the commands after → to fix them.")
+        return 1
+    print("All good." if not d.warned else f"No problems, {d.warned} warning(s).")
+    return 0
+
+# ── update ────────────────────────────────────────────────────────────
+# Only `tuxaide update` contacts GitHub: TuxAide never checks for updates by itself.
+UPDATE_FILES = [   # repository file → where the installer put it
+    ("agent.py",          os.path.join(BIN_DIR, "tuxaide")),
+    ("hook.sh",           HOOK_FILE),
+    ("session_writer.py", os.path.expanduser("~/.config/tuxaide/session_writer.py")),
+    ("uninstall.sh",      os.path.join(BIN_DIR, "tuxaide-uninstall")),
+    ("indexer.py",        os.path.join(BIN_DIR, "tuxaide-index")),   # only with Smart RAG
+]
+
+def version_tuple(v):
+    return tuple(int(n) for n in re.findall(r"\d+", v)[:3])
+
+def _github(url):
+    req = urllib.request.Request(url, headers={"User-Agent": f"tuxaide/{__version__}",
+                                               "Accept": "application/vnd.github+json"})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        return r.read()
+
+def latest_release():
+    """(tag, page URL) of the newest GitHub release."""
+    api = os.environ.get("TUXAIDE_GITHUB_API", "https://api.github.com")
+    repo = os.environ.get("TUXAIDE_REPO", "deltaxmodules/tuxaide")
+    rel = json.loads(_github(f"{api}/repos/{repo}/releases/latest"))
+    return rel["tag_name"], rel.get("html_url", f"https://github.com/{repo}/releases")
+
+def _check_download(name, data, tag):
+    """Refuse to install something that isn't what it should be."""
+    text = data.decode("utf-8")
+    if name.endswith(".py"):
+        compile(text, name, "exec")
+    if name == "agent.py":
+        m = re.search(r'^__version__ = "([^"]+)"', text, re.M)
+        if not m or version_tuple(m.group(1)) != version_tuple(tag):
+            raise ValueError(f"agent.py says version {m.group(1) if m else '?'}, release is {tag}")
+    if not text.startswith("#") or "TuxAide" not in text:
+        raise ValueError("unexpected content")
+
+def _install_file(dest, data):
+    """Replace dest atomically, keeping its first line when it points the script at
+    TuxAide's RAG virtualenv (the installer rewrites that shebang)."""
+    mode = 0o755
+    if os.path.exists(dest):
+        mode = os.stat(dest).st_mode & 0o777
+        with open(dest, "rb") as f:
+            old_first = f.readline()
+        if old_first.startswith(b"#!") and b"python" in old_first and data.startswith(b"#!/usr/bin/env python3"):
+            data = old_first + data.split(b"\n", 1)[1]
+    tmp = dest + ".new"
+    with open(tmp, "wb") as f:
+        f.write(data)
+    os.chmod(tmp, mode)
+    os.replace(tmp, dest)
+
+def update_cmd(args):
+    if any(a not in ("--check", "--force") for a in args):
+        print("Usage: tuxaide update [--check] [--force]")
+        return 2
+    print(f"🐧 Checking GitHub for a newer TuxAide (you have {__version__})...")
+    try:
+        tag, page = latest_release()
+    except Exception as e:
+        print(f"{C.O}⚠ Couldn't reach GitHub: {e}{C.Z}")
+        return 1
+    latest = tag.lstrip("vV")
+    if version_tuple(latest) <= version_tuple(__version__) and "--force" not in args:
+        print(f"{C.G}✓{C.Z} You have the latest version.")
+        return 0
+    if "--check" in args:
+        print(f"   TuxAide {latest} is available. Update with: tuxaide update")
+        print(f"{C.D}   What's new: {page}{C.Z}")
+        return 0
+    installed = UPDATE_FILES[0][1]
+    if os.path.realpath(os.path.abspath(sys.argv[0])) != os.path.realpath(installed):
+        print(f"{C.O}⚠ This TuxAide ({sys.argv[0]}) isn't the installed one ({installed}).{C.Z}")
+        print(f"{C.D}  If it's a git checkout, update it with: git pull{C.Z}")
+        return 1
+    raw = os.environ.get("TUXAIDE_GITHUB_RAW", "https://raw.githubusercontent.com")
+    repo = os.environ.get("TUXAIDE_REPO", "deltaxmodules/tuxaide")
+    targets = [(n, d) for n, d in UPDATE_FILES if n != "indexer.py" or os.path.exists(d)]
+    downloads = {}
+    for name, _ in targets:          # download and check everything before touching anything
+        try:
+            data = _github(f"{raw}/{repo}/{tag}/{name}")
+            _check_download(name, data, tag)
+        except Exception as e:
+            print(f"{C.O}⚠ Couldn't download {name} from {tag}: {e}. Nothing was changed.{C.Z}")
+            return 1
+        downloads[name] = data
+    for name, dest in targets:
+        _install_file(dest, downloads[name])
+    print(f"{C.G}✓{C.Z} Updated TuxAide {__version__} → {latest}. Settings, history and cache were kept.")
+    print(f"{C.D}   What's new: {page}{C.Z}")
+    return 0
+
 # ── CLI ───────────────────────────────────────────────────────────────
 def main():
-    if len(sys.argv) < 2: sys.exit(0)
+    if len(sys.argv) < 2 or sys.argv[1] in ("help", "--help", "-h"):
+        print_help()
+        return
     mode_arg = sys.argv[1]
+    args = sys.argv[2:]
+
+    if mode_arg in ("--version", "-V", "version"):
+        print(f"TuxAide {__version__}")
+        return
+    commands = {"doctor": lambda: doctor(), "config": lambda: config_cmd(args),
+                "model": lambda: model_cmd(args), "modelo": lambda: model_cmd(args),
+                "cache": lambda: cache_cmd(args), "update": lambda: update_cmd(args)}
+    if mode_arg in commands:
+        # Plain text when piped (e.g. doctor's output pasted into a bug report).
+        if not sys.stdout.isatty() or not cfg().get("color", True):
+            C.off()
+        sys.exit(commands[mode_arg]())
 
     # --check: is this a question?
     if mode_arg == "--check":
@@ -1225,20 +1802,13 @@ def main():
         if len(sys.argv) != 4 or sys.argv[2] not in SETTABLE:
             print(f"Usage: tuxaide --set <{'|'.join(sorted(SETTABLE))}> <value>")
             sys.exit(2)
-        key, raw = sys.argv[2], sys.argv[3]
-        try:
-            save_cfg({key: SETTABLE[key](raw)})
-        except ValueError as e:
-            print(f"Invalid value for {key}: {e}")
-            sys.exit(2)
-        return
+        sys.exit(set_setting(sys.argv[2], sys.argv[3]))
 
     # --explain-last: force contextual explanation from last shell run
     if mode_arg == "--explain-last":
         c = cfg()
         if not ollama_ok(c):
-            print(f"\n{C.O}⚠ Ollama not available.{C.Z}")
-            print(f"{C.D}  Try: sudo systemctl start ollama{C.Z}\n")
+            print_ollama_down(c)
             return
         last_run = load_last_shell_context()
         if not last_run:
@@ -1256,8 +1826,7 @@ def main():
     if mode_arg == "--why":
         c = cfg()
         if not ollama_ok(c):
-            print(f"\n{C.O}⚠ Ollama not available.{C.Z}")
-            print(f"{C.D}  Try: sudo systemctl start ollama{C.Z}\n")
+            print_ollama_down(c)
             return
         cmd = sys.argv[2] if len(sys.argv) > 2 else ""
         rc  = sys.argv[3] if len(sys.argv) > 3 else ""
@@ -1270,17 +1839,8 @@ def main():
             c = cfg()
             print(f"🐧 TuxAide mode: {c.get('mode','llm').upper()}")
             return
-        new_mode = sys.argv[2].lower()
-        if new_mode == "rag": new_mode = "deep"  # backwards compat
-        if new_mode not in ("llm", "smart", "deep"):
-            print("Usage: tuxaide mode [llm|smart|deep]"); return
-        if new_mode in ("smart", "deep") and not rag_available():
-            print(f"{C.O}⚠ RAG requires chromadb, which isn't installed.{C.Z}")
-            print(f"{C.D}  Re-run the TuxAide installer and answer Y to Smart RAG.{C.Z}"); return
-        top_k = 1 if new_mode == "smart" else 3
-        max_tokens = 300 if new_mode in ("llm", "smart") else 600
-        save_cfg({"mode": new_mode, "rag_top_k": top_k, "max_tokens": max_tokens})
-        print(f"🐧 TuxAide mode switched to: {new_mode.upper()}")
+        if set_mode(sys.argv[2]) == 0:
+            print(f"🐧 TuxAide mode switched to: {cfg()['mode'].upper()}")
         return
 
     # index: index a specific man page
@@ -1349,8 +1909,7 @@ def main():
 
     c = cfg()
     if not ollama_ok(c):
-        print(f"\n{C.O}⚠ Ollama not available.{C.Z}")
-        print(f"{C.D}  Try: sudo systemctl start ollama{C.Z}\n")
+        print_ollama_down(c)
         sys.exit(0)
 
     # "why did this fail?" right after a failed command → same as `?`
