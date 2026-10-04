@@ -1,4 +1,5 @@
 # ── TuxAide hook ── loaded by ~/.bashrc / ~/.zshrc ─────────────────
+# shellcheck shell=bash
 _LG="${HOME}/.local/bin/tuxaide"
 _TUX_CFG="${HOME}/.config/tuxaide/config.json"
 _TUX_SESSION_WRITER="${HOME}/.config/tuxaide/session_writer.py"
@@ -244,7 +245,9 @@ command_not_found_handle() {
     # ("gti status" → "git status"), or exits 1 for a plain "not found".
     # This handler runs in a subshell, so exporting here doesn't leak.
     export TUXAIDE_LAST_CMD="$_TUX_LAST_CMD" TUXAIDE_LAST_RC="$_TUX_LAST_RC"
-    export TUXAIDE_NAMES="$({ compgen -a; compgen -A function; compgen -b; } 2>/dev/null)"
+    local names
+    names="$({ compgen -a; compgen -A function; compgen -b; } 2>/dev/null)"
+    export TUXAIDE_NAMES="$names"
     _tux_agent --not-found "$question"
     case $? in
         0) return 0 ;;     # answered as a question
@@ -285,6 +288,7 @@ if [[ -n "${ZSH_VERSION:-}" ]]; then
         fi
         # Same single agent call as in bash (see command_not_found_handle).
         export TUXAIDE_LAST_CMD="$_TUX_LAST_CMD" TUXAIDE_LAST_RC="$_TUX_LAST_RC"
+        # shellcheck disable=SC2296  # zsh-only expansion flags
         export TUXAIDE_NAMES="${(F)${(k)aliases}} ${(F)${(k)functions}} ${(F)${(k)builtins}}"
         noglob "$_LG" --not-found "$line"
         case $? in
@@ -308,7 +312,8 @@ _tux_prewarm() {
         off) return 0 ;;
         always) ;;
         *)
-            local marker="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/tuxaide-prewarm-$(id -u)"
+            local marker
+            marker="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/tuxaide-prewarm-$(id -u)"
             [[ -n "$(find "$marker" -mmin -10 2>/dev/null)" ]] && return 0
             touch "$marker" 2>/dev/null
             ;;

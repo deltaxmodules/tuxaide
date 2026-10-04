@@ -143,17 +143,14 @@ diagnose_system() {
     if [[ $RAM_GB -ge 8 ]]; then
         MODEL="qwen2.5-coder:7b"
         MODEL_SIZE="4.7 GB"
-        MODEL_NOTE="Linux/code specialist — best quality"
         RAG_CAPABLE=true
     elif [[ $RAM_GB -ge 5 ]]; then
         MODEL="qwen2.5:3b"
         MODEL_SIZE="1.9 GB"
-        MODEL_NOTE="good Linux knowledge, 5-8 GB RAM"
         RAG_CAPABLE=true
     else
         MODEL="qwen2.5:3b"
         MODEL_SIZE="1.9 GB"
-        MODEL_NOTE="best lightweight option — RAM is limited"
         RAG_CAPABLE=false
     fi
 
@@ -408,7 +405,8 @@ start_ollama() {
             else sudo useradd -r -s /bin/false -d /usr/share/ollama ollama 2>/dev/null || true; fi
         fi
         if [[ ! -f /etc/systemd/system/ollama.service ]]; then
-            local svc="[Unit]
+            local svc
+            svc="[Unit]
 Description=Ollama Service
 After=network-online.target
 

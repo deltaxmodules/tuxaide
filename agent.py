@@ -479,7 +479,7 @@ def should_use_rag(question):
 # ── RAG functions ─────────────────────────────────────────────────────
 def rag_available():
     try:
-        import chromadb
+        import chromadb  # noqa: F401  (a real import: an installed-but-broken chromadb counts as unavailable)
         return True
     except ImportError:
         return False
@@ -972,7 +972,8 @@ def suggest_main(line, extra=()):
         return 1
 
     print(not_found_message(typed), file=sys.stderr)
-    hint = f"🐧 Did you mean: {C.B}{fixed}{C.Z}"
+    bold, reset = (C.B, C.Z) if c.get("color", True) and sys.stderr.isatty() else ("", "")
+    hint = f"🐧 Did you mean: {bold}{fixed}{reset}"
     tty = None
     if sys.stdout.isatty() and not is_destructive(fixed):
         try:
@@ -1192,13 +1193,11 @@ def main():
     t_embed   = 0.0
     t_rag     = 0.0
     t_llm     = 0.0
-    cache_hit = False
 
     # ── Answer cache lookup ───────────────────────────────────────────
     cached_answer = None if context_query else cache_get(
         "answers", ans_key, c.get("cache_ttl_days", 30))
     if cached_answer and cached_answer.get("answer"):
-        cache_hit = True
         answer    = cached_answer["answer"]
         act_mode  = cached_answer.get("mode", "llm")
         perf_log(norm_q, act_mode + "+cache", 0, 0, 0, True)
