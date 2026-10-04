@@ -1,10 +1,29 @@
 # ── TuxAide hook ── loaded by ~/.bashrc / ~/.zshrc ─────────────────
 # shellcheck shell=bash
-_LG="${HOME}/.local/bin/tuxaide"
+# This file lives in ~/.config/tuxaide (curl installer), in share/tuxaide
+# (Homebrew, AUR) or inside the Python package (pipx); session_writer.py sits
+# next to it.
+if [[ -n "${ZSH_VERSION:-}" ]]; then
+    # shellcheck disable=SC2296,SC2298  # zsh: path of the file being sourced
+    _TUX_HOOK="${${(%):-%x}:a}"
+else
+    _TUX_HOOK="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/${BASH_SOURCE[0]##*/}"
+fi
+_TUX_DIR="${_TUX_HOOK%/*}"
+# The agent: the one installed with this hook, else the curl installer's, else PATH.
+if [[ "$_TUX_DIR" == */share/tuxaide && -x "${_TUX_DIR%/share/tuxaide}/bin/tuxaide" ]]; then
+    _LG="${_TUX_DIR%/share/tuxaide}/bin/tuxaide"
+elif [[ -x "${HOME}/.local/bin/tuxaide" ]]; then
+    _LG="${HOME}/.local/bin/tuxaide"
+elif [[ -n "${ZSH_VERSION:-}" ]]; then
+    _LG="$(whence -p tuxaide)"
+else
+    _LG="$(type -P tuxaide)"
+fi
+_LG="${_LG:-tuxaide}"
 _TUX_CFG="${HOME}/.config/tuxaide/config.json"
-_TUX_SESSION_WRITER="${HOME}/.config/tuxaide/session_writer.py"
+_TUX_SESSION_WRITER="${_TUX_DIR}/session_writer.py"
 _TUX_PENDING_DIR="${HOME}/.config/tuxaide/pending"
-_TUX_HOOK="${HOME}/.config/tuxaide/hook.sh"
 
 # Lets TuxAide hand a chosen command back to *this* shell's prompt. The
 # command-not-found handler runs in a subshell, so it can't edit the prompt
@@ -73,7 +92,7 @@ _tux_run() {
     [[ -s "$stdout_file" ]] && cat "$stdout_file"
     [[ -s "$stderr_file" ]] && cat "$stderr_file" >&2
 
-    if [[ "$capture_enabled" == "true" && -x "$_TUX_SESSION_WRITER" ]]; then
+    if [[ "$capture_enabled" == "true" && -f "$_TUX_SESSION_WRITER" ]]; then
         local first_word capturable shell_name
         first_word="${cmd%% *}"
         capturable="true"
@@ -245,12 +264,25 @@ if [[ -n "${BASH_VERSION:-}" ]]; then
 fi
 
 # ── Automatic hook via command_not_found_handle ────────────────────
+# Keep the handler that was there before (Ubuntu's "install it with apt",
+# Fedora's PackageKit, …): it still answers for commands TuxAide has nothing
+# to say about.
+if [[ -n "${BASH_VERSION:-}" ]] && declare -f command_not_found_handle >/dev/null 2>&1 \
+        && [[ "$(declare -f command_not_found_handle)" != *--not-found* ]]; then
+    eval "_tux_prev_cnf () $(declare -f command_not_found_handle | tail -n +2)"
+fi
+_tux_not_found() {
+    if declare -f _tux_prev_cnf >/dev/null 2>&1; then
+        _tux_prev_cnf "$@"
+        return $?
+    fi
+    echo "bash: $1: command not found" >&2
+    return 127
+}
+
 command_not_found_handle() {
     local cmd="$1"
-    [[ "$_LG_ON" != "true" ]] && {
-        echo "bash: $cmd: command not found" >&2
-        return 127
-    }
+    [[ "$_LG_ON" != "true" ]] && { _tux_not_found "$@"; return $?; }
     local full_cmd
     full_cmd=$(HISTTIMEFORMAT="" history 1 2>/dev/null | sed 's/^ *[0-9]* *//')
     local question="${full_cmd:-$*}"
@@ -261,13 +293,13 @@ command_not_found_handle() {
     local names
     names="$({ compgen -a; compgen -A function; compgen -b; } 2>/dev/null)"
     export TUXAIDE_NAMES="$names"
+    declare -f _tux_prev_cnf >/dev/null 2>&1 && export TUXAIDE_PREV_CNF=1
     _tux_agent --not-found "$question"
     case $? in
         0) return 0 ;;     # answered as a question
         3) return 127 ;;   # typo: suggestion already printed
     esac
-    echo "bash: $cmd: command not found" >&2
-    return 127
+    _tux_not_found "$@"
 }
 
 # ── Zsh hook ───────────────────────────────────────────────────────
@@ -292,24 +324,38 @@ if [[ -n "${ZSH_VERSION:-}" ]]; then
     add-zsh-hook preexec _tux_preexec 2>/dev/null
     add-zsh-hook precmd _tux_precmd 2>/dev/null
 
+    # Keep the previous handler, as in bash (Ubuntu's, oh-my-zsh's plugin, …).
+    # shellcheck disable=SC2154  # zsh's $functions
+    if (( ${+functions[command_not_found_handler]} )) \
+            && [[ "${functions[command_not_found_handler]}" != *--not-found* ]]; then
+        functions[_tux_prev_cnf]="${functions[command_not_found_handler]}"
+    fi
+    _tux_not_found_zsh() {
+        if (( ${+functions[_tux_prev_cnf]} )); then
+            _tux_prev_cnf "$@"
+            return $?
+        fi
+        echo "zsh: command not found: $1" >&2
+        return 127
+    }
+
     command_not_found_handler() {
-        local cmd="$1"
         local line="$*"
         if [[ "$_LG_ON" != "true" ]]; then
-            echo "zsh: command not found: $cmd" >&2
-            return 127
+            _tux_not_found_zsh "$@"
+            return $?
         fi
         # Same single agent call as in bash (see command_not_found_handle).
         export TUXAIDE_LAST_CMD="$_TUX_LAST_CMD" TUXAIDE_LAST_RC="$_TUX_LAST_RC"
         # shellcheck disable=SC2296  # zsh-only expansion flags
         export TUXAIDE_NAMES="${(F)${(k)aliases}} ${(F)${(k)functions}} ${(F)${(k)builtins}}"
+        (( ${+functions[_tux_prev_cnf]} )) && export TUXAIDE_PREV_CNF=1
         noglob "$_LG" --not-found "$line"
         case $? in
             0) return 0 ;;
             3) return 127 ;;
         esac
-        echo "zsh: command not found: $cmd" >&2
-        return 127
+        _tux_not_found_zsh "$@"
     }
 fi
 

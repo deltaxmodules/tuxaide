@@ -1,0 +1,14 @@
+post_install() {
+    echo "==> Set up the model and your shell (as your user, once):"
+    echo "==>   sudo systemctl enable --now ollama"
+    echo "==>   tuxaide setup"
+}
+
+post_upgrade() {
+    echo "==> Open a new terminal to load the new TuxAide hook."
+}
+
+pre_remove() {
+    echo "==> To remove TuxAide's lines from your shell rc and its data, run first:"
+    echo "==>   tuxaide uninstall"
+}

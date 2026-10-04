@@ -34,19 +34,28 @@ No browser. No copy/paste. No remembering flags.
 
 ## 🚀 Install
 
+**One command** (Linux and macOS) — installs Ollama, picks the model that fits your RAM, and sets up your shell:
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/deltaxmodules/tuxaide/main/setup.sh | bash
 ```
 
-Then:
+Before changing anything it shows what it will do (packages, `sudo`, files, download size)
+and asks once. Files come from the tagged release and are checked against its `SHA256SUMS`.
+Options: `… | bash -s -- --yes` (no questions), `--no-rag`, `--model <name>`.
 
-```bash
-# Linux (bash)
-source ~/.bashrc
+**With your package manager**, then run `tuxaide setup` once (model, Smart RAG, shell):
 
-# macOS (zsh)
-source ~/.zshrc
-```
+| | |
+| --- | --- |
+| Homebrew (macOS, Linux) | `brew install deltaxmodules/tap/tuxaide` |
+| Arch (AUR) | `yay -S tuxaide` |
+| pipx (any system with Python) | `pipx install tuxaide` — with Smart RAG: `pipx install 'tuxaide[rag]'` |
+
+Open a new terminal (or `source ~/.zshrc` / `source ~/.bashrc`) and start typing questions.
+
+**Uninstall:** `tuxaide uninstall` removes only the lines TuxAide added to your shell rc
+(a backup is kept next to it), plus its settings and data; then remove the package if you used one.
 
 Start typing questions directly in your terminal.
 
@@ -204,7 +213,8 @@ tuxaide --timing
 tuxaide reindex
 tuxaide index nginx
 
-tuxaide-uninstall
+tuxaide setup              # model, Smart RAG and shell, again
+tuxaide uninstall
 ```
 
 `tuxaide on` / `tuxaide off` are remembered across new terminals.
@@ -231,7 +241,9 @@ in the current terminal too) or `tuxaide config reset <key>`; `tuxaide config` l
 | `api_base` | — | Backend `openai`: the API address, e.g. `http://localhost:1234/v1` |
 | `api_key_env` | `OPENAI_API_KEY` | Backend `openai`: the environment variable that holds the API key |
 
-Smart RAG's Python dependencies (ChromaDB) are installed in TuxAide's own virtualenv at `~/.local/share/tuxaide/venv`, never in your system Python, so no `pip` command is needed. `tuxaide-uninstall` removes it.
+Smart RAG's Python dependencies (ChromaDB) are installed in TuxAide's own virtualenv at `~/.local/share/tuxaide/venv`, never in your system Python, so no `pip` command is needed. `tuxaide uninstall` removes it. With Homebrew or the AUR,
+`tuxaide setup --rag` creates that virtualenv and TuxAide uses it automatically; man pages are
+indexed in the background (`tuxaide doctor` shows the progress).
 
 ---
 

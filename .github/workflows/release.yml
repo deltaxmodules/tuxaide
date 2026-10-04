@@ -1,0 +1,46 @@
+name: Release
+
+# Runs when a tag like v2.3.0 is pushed. It refuses a tag that doesn't match
+# __version__, then publishes the GitHub release with:
+#   install.sh, setup.sh, SHA256SUMS   — what the curl installer and `tuxaide update` check
+#   tuxaide.rb, PKGBUILD               — ready for the Homebrew tap and the AUR
+#   the wheel and sdist                — for PyPI (pipx install tuxaide)
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag matches __version__
+        run: |
+          version="$(sed -n 's/^__version__ = "\(.*\)"/\1/p' agent.py)"
+          [ "v$version" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME != v$version"; exit 1; }
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Checksums
+        run: |
+          mkdir -p dist
+          sha256sum agent.py hook.sh session_writer.py uninstall.sh indexer.py install.sh setup.sh > dist/SHA256SUMS
+          cp install.sh setup.sh dist/
+          cat dist/SHA256SUMS
+
+      - name: Homebrew formula and PKGBUILD
+        run: scripts/render-packaging.sh "$VERSION" "https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/v${VERSION}.tar.gz" dist
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Wheel and sdist
+        run: pipx run build --outdir dist
+
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "TuxAide $VERSION" --generate-notes

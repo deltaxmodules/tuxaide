@@ -5,18 +5,18 @@
 #
 #  One-liner install:
 #    curl -fsSL https://raw.githubusercontent.com/deltaxmodules/tuxaide/main/setup.sh | bash
+#    … | bash -s -- --yes            no questions
 #
 #  What it does:
-#    1.  Detects distro, architecture, RAM and GPU
-#    2.  Shows system diagnosis and asks for confirmation
-#    3.  Installs the core components (Ollama, model, shell hook)
-#    4.  Asks if user wants RAG mode (man page knowledge base)
-#    5.  If yes: installs ChromaDB, embedding model, indexes man pages
-#    6.  Activates immediately — no terminal restart needed
+#    1.  Detects the system and picks the model that fits its RAM
+#    2.  Asks its questions (Smart RAG, a remote backend on small machines)
+#    3.  Shows everything it will do and asks once
+#    4.  Installs Ollama and TuxAide's files (from the tagged release,
+#        checked against SHA256SUMS)
+#    5.  Runs `tuxaide setup`: settings, model, Smart RAG (man pages are
+#        indexed in the background), the lines in your shell rc, doctor
 #
-#  To disable RAG:   tuxaide mode llm
-#  To re-enable RAG: tuxaide mode smart
-#  To uninstall:     tuxaide-uninstall
+#  To uninstall:     tuxaide uninstall
 # ══════════════════════════════════════════════════════════════════════
 
 set -euo pipefail
@@ -24,13 +24,41 @@ set -euo pipefail
 # Must match __version__ in agent.py (tests/test_version.py checks).
 TUXAIDE_VERSION="2.3.0"
 
+usage() {
+    cat <<'EOF'
+Usage: install.sh [--yes] [--no-rag] [--model <name>]
+  -y, --yes        don't ask anything: take the recommended answers
+  --no-rag         skip Smart RAG (the man-page knowledge base)
+  --model <name>   use this Ollama model instead of the one picked for your RAM
+EOF
+}
+
+ASSUME_YES=false
+FORCE_NO_RAG=false
+MODEL_OVERRIDE=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -y|--yes)  ASSUME_YES=true ;;
+        --no-rag)  FORCE_NO_RAG=true ;;
+        --model)   MODEL_OVERRIDE="${2:-}"; shift || true ;;
+        --model=*) MODEL_OVERRIDE="${1#--model=}" ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
+    esac
+    shift
+done
+if [[ -n "$MODEL_OVERRIDE" && ! "$MODEL_OVERRIDE" =~ ^[A-Za-z0-9._:/-]+$ ]]; then
+    echo "Not a valid model name: $MODEL_OVERRIDE" >&2
+    exit 2
+fi
+
 # ── Colours ───────────────────────────────────────────────────────────
 R="\033[0m"; BOLD="\033[1m"; DIM="\033[2m"
 CY="\033[36m"; GR="\033[32m"; YL="\033[33m"; RD="\033[31m"; MG="\033[35m"
 
 # ── Helpers ───────────────────────────────────────────────────────────
 banner() {
-    clear 2>/dev/null || true
+    [[ "$ASSUME_YES" == "true" ]] || clear 2>/dev/null || true
     echo ""
     echo -e "${CY}${BOLD}╔══════════════════════════════════════════════════════╗${R}"
     echo -e "${CY}${BOLD}║   🐧  TuxAide ${TUXAIDE_VERSION} — Complete Installer            ║${R}"
@@ -49,8 +77,23 @@ info()  { echo -e "  ${DIM}→  $*${R}"; }
 err()   { echo -e "\n${RD}${BOLD}  ✗  ERROR: $*${R}\n"; exit 1; }
 ask()   { echo -e "  ${MG}?${R}  $*"; }
 
+# answer VAR DEFAULT — read the reply to the question just asked. With --yes
+# (or with no terminal) the default is taken and shown.
+answer() {
+    # (a local named like the caller's variable would hide it from printf -v)
+    local __tux_reply=""
+    if [[ "$ASSUME_YES" == "true" ]] || ! { true </dev/tty; } 2>/dev/null; then
+        __tux_reply="$2"
+        echo -e "     ${DIM}${__tux_reply:-(default)}${R}"
+    else
+        read -r __tux_reply </dev/tty || __tux_reply=""
+        __tux_reply="${__tux_reply:-$2}"
+    fi
+    printf -v "$1" '%s' "$__tux_reply"
+}
+
 STEP=0
-TOTAL_STEPS=9
+TOTAL_STEPS=7
 INSTALL_RAG=false
 # Where answers come from: "local" (Ollama here), "ollama-remote" (Ollama on
 # another computer) or "openai" (an OpenAI-compatible API). Remote is only
@@ -166,6 +209,20 @@ diagnose_system() {
         MODEL="qwen2.5:0.5b";     MODEL_SIZE="398 MB"; DISK_NEED_GB=1; RAG_CAPABLE=false
         LOW_RAM=true
     fi
+    # A model chosen before (re-install) or on the command line wins.
+    local current
+    current=$(python3 -c 'import json,os,sys; print(json.load(open(os.path.expanduser("~/.config/tuxaide/config.json"))).get("model",""))' 2>/dev/null || true)
+    if [[ -n "$MODEL_OVERRIDE" || -n "$current" ]]; then
+        MODEL="${MODEL_OVERRIDE:-$current}"
+        case "$MODEL" in
+            qwen2.5-coder:7b) MODEL_SIZE="4.7 GB" ;;
+            qwen2.5:3b)       MODEL_SIZE="1.9 GB" ;;
+            qwen2.5:1.5b)     MODEL_SIZE="986 MB" ;;
+            qwen2.5:0.5b)     MODEL_SIZE="398 MB" ;;
+            *)                MODEL_SIZE="size unknown" ;;
+        esac
+        LOW_RAM=false
+    fi
 
     # ── Print diagnosis summary ────────────────────────────────────────
     echo ""
@@ -216,18 +273,7 @@ diagnose_system() {
     fi
 
     [[ $LOW_RAM == "true" ]] && choose_backend
-
-    # Confirmation
-    echo ""
-    ask "Proceed with installation? [Y/n] "
-    read -r CONFIRM </dev/tty
-    CONFIRM="${CONFIRM:-y}"
-    if [[ ! "$CONFIRM" =~ ^[yYsS]$ ]]; then
-        echo ""
-        echo -e "  ${YL}Installation cancelled.${R}"
-        echo ""
-        exit 0
-    fi
+    return 0
 }
 
 # Below ~3 GB of RAM a local model is barely usable. Offer a tiny local
@@ -239,14 +285,14 @@ choose_backend() {
     echo -e "  ${BOLD}2)${R} Ollama on another computer in your network"
     echo -e "  ${BOLD}3)${R} An OpenAI-compatible API (LM Studio, llama.cpp server, vLLM or a cloud service)"
     ask "Choose [1]: "
-    local choice answer
-    read -r choice </dev/tty
+    local choice reply
+    answer choice 1
     case "${choice:-1}" in
         2)
             ask "Address of that Ollama (e.g. http://192.168.1.10:11434): "
-            read -r answer </dev/tty
-            [[ "$answer" =~ ^https?://[^[:space:]]+$ ]] || err "Not a valid address: $answer"
-            OLLAMA_URL="${answer%/}"
+            answer reply ""
+            [[ "$reply" =~ ^https?://[^[:space:]]+$ ]] || err "Not a valid address: $reply"
+            OLLAMA_URL="${reply%/}"
             if ! curl -fsS -m 5 "${OLLAMA_URL}/api/tags" -o /tmp/tuxaide_tags.json 2>/dev/null; then
                 err "No Ollama answering at ${OLLAMA_URL}. Start it there with OLLAMA_HOST=0.0.0.0 ollama serve"
             fi
@@ -254,23 +300,20 @@ choose_backend() {
             models=$(python3 -c 'import json; print(" ".join(m["name"] for m in json.load(open("/tmp/tuxaide_tags.json")).get("models", [])))' 2>/dev/null || true)
             info "Models there: ${models:-none}"
             ask "Model to use [${models%% *}]: "
-            read -r answer </dev/tty
-            MODEL="${answer:-${models%% *}}"
+            answer MODEL "${models%% *}"
             [[ -n "$MODEL" ]] || err "No model chosen. Download one on that computer: ollama pull qwen2.5-coder:7b"
             BACKEND="ollama-remote"
             ;;
         3)
             ask "API address [https://api.openai.com/v1]: "
-            read -r answer </dev/tty
-            API_BASE="${answer:-https://api.openai.com/v1}"
+            answer API_BASE "https://api.openai.com/v1"
             API_BASE="${API_BASE%/}"
             [[ "$API_BASE" =~ ^https?://[^[:space:]]+$ ]] || err "Not a valid address: $API_BASE"
             ask "Model name (as the API calls it): "
-            read -r MODEL </dev/tty
+            answer MODEL ""
             [[ "$MODEL" =~ ^[A-Za-z0-9._:/-]+$ ]] || err "Not a valid model name: $MODEL"
             ask "Environment variable that holds your API key [OPENAI_API_KEY]: "
-            read -r answer </dev/tty
-            API_KEY_ENV="${answer:-OPENAI_API_KEY}"
+            answer API_KEY_ENV "OPENAI_API_KEY"
             [[ "$API_KEY_ENV" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || err "Not a valid variable name: $API_KEY_ENV"
             BACKEND="openai"
             ;;
@@ -286,7 +329,7 @@ choose_backend() {
         *) warn "☁ Your questions will be sent to ${host} — they leave this machine." ;;
     esac
     # Nothing to download or run locally; Smart RAG needs a local Ollama.
-    TOTAL_STEPS=$((TOTAL_STEPS - 3))
+    TOTAL_STEPS=$((TOTAL_STEPS - 2))
     RAG_CAPABLE=false
 }
 
@@ -314,8 +357,8 @@ ask_rag() {
     echo -e "  ${GR}✓${R}  Drastically reduced hallucinations on local docs"
     echo -e "  ${GR}✓${R}  Responses cite the source: man page + section"
     echo ""
-    echo -e "  ${DIM}Extra requirements: ~300 MB RAM + ~10 min indexing (one-time)${R}"
-    echo -e "  ${DIM}If skipped now, you can enable later with: tuxaide mode smart${R}"
+    echo -e "  ${DIM}Extra: ~300 MB RAM, ~400 MB download; man pages are indexed in the background${R}"
+    echo -e "  ${DIM}If skipped now, you can enable it later with: tuxaide setup --rag${R}"
     echo ""
 
     if [[ "$RAG_AVAILABLE" == "false" || "$BACKEND" != "local" ]]; then
@@ -325,16 +368,68 @@ ask_rag() {
         return
     fi
 
+    if [[ "$FORCE_NO_RAG" == "true" ]]; then
+        INSTALL_RAG=false
+        info "Skipping Smart RAG (--no-rag). Enable later with: tuxaide setup --rag"
+        return
+    fi
     ask "Install Smart RAG mode? (recommended) [Y/n] "
-    read -r RAG_CONFIRM </dev/tty
-    RAG_CONFIRM="${RAG_CONFIRM:-y}"
+    answer RAG_CONFIRM y
     if [[ "$RAG_CONFIRM" =~ ^[yYsS]$ ]]; then
         INSTALL_RAG=true
         ok "Smart RAG mode will be installed"
     else
         INSTALL_RAG=false
         info "Skipping RAG — installing LLM mode only"
-        info "Enable later with: tuxaide mode smart"
+        info "Enable later with: tuxaide setup --rag"
+    fi
+}
+
+# ═══════════════════════════════════════════════════════════════════════
+# Everything the installer will do, before it does any of it
+# ═══════════════════════════════════════════════════════════════════════
+show_plan() {
+    local -a missing=() pkgs=()
+    local c sudo_note=""
+    for c in python3 curl; do command -v "$c" &>/dev/null || missing+=("$c"); done
+    [[ $EUID -eq 0 ]] || sudo_note=" (with sudo)"
+    pkgs=("${missing[@]+"${missing[@]}"}")
+    if [[ "$INSTALL_RAG" == "true" ]] && command -v apt-get &>/dev/null && ! python3 -c 'import ensurepip' &>/dev/null; then
+        pkgs+=("python3-venv")
+    fi
+    local rc="bashrc"
+    [[ "$CURRENT_SHELL" == "zsh" ]] && rc="zshrc"
+
+    echo ""
+    echo -e "  ${BOLD}The installer will:${R}"
+    [[ ${#pkgs[@]} -gt 0 ]] && echo -e "   • install ${pkgs[*]} with your package manager${sudo_note}"
+    if [[ "$BACKEND" == "local" ]]; then
+        if command -v ollama &>/dev/null; then
+            echo -e "   • use the Ollama already installed"
+        elif [[ "$OS" == "macos" ]]; then
+            echo -e "   • install Ollama (Homebrew, or the app from ollama.com)"
+        else
+            echo -e "   • install Ollama with its official script from ollama.com${sudo_note}"
+        fi
+        echo -e "   • download the model ${CY}${MODEL}${R} (${MODEL_SIZE})"
+    else
+        echo -e "   • use ${CY}${MODEL}${R} on ${OLLAMA_URL}${API_BASE:+ }${API_BASE} — nothing is downloaded"
+    fi
+    if [[ "$INSTALL_RAG" == "true" ]]; then
+        echo -e "   • install Smart RAG: chromadb in ~/.local/share/tuxaide/venv (~150 MB) and"
+        echo -e "     nomic-embed-text (274 MB); index man pages in the background"
+    fi
+    echo -e "   • write ~/.local/bin/tuxaide* and ~/.config/tuxaide/ (from release v${TUXAIDE_VERSION})"
+    echo -e "   • add a 3-line TuxAide block to ~/.${rc} (a backup is kept)"
+    echo ""
+    ask "Proceed? [Y/n] "
+    local reply
+    answer reply y
+    if [[ ! "$reply" =~ ^[yYsS]$ ]]; then
+        echo ""
+        echo -e "  ${YL}Installation cancelled. Nothing was changed.${R}"
+        echo ""
+        exit 0
     fi
 }
 
@@ -369,7 +464,6 @@ install_dependencies() {
 
     _need python3
     _need curl
-    _need unzip
 
     PY_VER=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
     ok "Python $PY_VER"
@@ -485,7 +579,9 @@ start_ollama() {
         fi
     elif [[ "$HAS_SYSTEMD" == "true" ]]; then
         info "Registering as systemd service (starts on boot)..."
-        if ! id -u ollama &>/dev/null; then
+        # Ollama's official installer creates its own unit and user; only
+        # write ours when it didn't (e.g. the direct-binary fallback).
+        if [[ ! -f /etc/systemd/system/ollama.service ]] && ! id -u ollama &>/dev/null; then
             if [[ $EUID -eq 0 ]]; then useradd -r -s /bin/false -d /usr/share/ollama ollama 2>/dev/null || true
             else sudo useradd -r -s /bin/false -d /usr/share/ollama ollama 2>/dev/null || true; fi
         fi
@@ -531,41 +627,6 @@ WantedBy=multi-user.target"
 # ═══════════════════════════════════════════════════════════════════════
 # STEP 5 — AI Models
 # ═══════════════════════════════════════════════════════════════════════
-# Exact name match: "qwen2.5:1.5b" must not count as present because
-# "qwen2.5-coder:7b" is ("llama3.2" means "llama3.2:latest").
-has_model() {
-    local want="$1"
-    [[ "$want" == *:* ]] || want="${want}:latest"
-    ollama list 2>/dev/null | awk 'NR > 1 {print $1}' | grep -qxF "$want"
-}
-
-download_models() {
-    [[ "$BACKEND" == "local" ]] || return 0
-    step "Downloading AI models"
-
-    # Main LLM
-    if has_model "$MODEL"; then
-        ok "Model $MODEL already exists"
-    else
-        info "Downloading $MODEL ($MODEL_SIZE) — this may take a few minutes..."
-        echo ""
-        ollama pull "$MODEL" || err "Failed to download $MODEL"
-        echo ""
-        ok "Model $MODEL ready"
-    fi
-
-    # Embedding model for RAG
-    if [[ "$INSTALL_RAG" == "true" ]]; then
-        if has_model nomic-embed-text; then
-            ok "Embedding model nomic-embed-text already exists"
-        else
-            info "Downloading embedding model: nomic-embed-text (274 MB)..."
-            ollama pull nomic-embed-text || warn "Failed to download embedding model — RAG will be disabled"
-            ok "Embedding model ready"
-        fi
-    fi
-}
-
 # ═══════════════════════════════════════════════════════════════════════
 # STEP 6 — Install TuxAide files
 # ═══════════════════════════════════════════════════════════════════════
@@ -581,6 +642,37 @@ resolve_source_dir() {
     echo ""
 }
 
+# Files come from the release tagged v$TUXAIDE_VERSION and are checked against
+# its SHA256SUMS. Until that release exists, main is used (with a warning).
+REPO_SLUG="${TUXAIDE_REPO:-deltaxmodules/tuxaide}"
+REF="${TUXAIDE_REF:-v${TUXAIDE_VERSION}}"
+RAW_BASE=""
+SUMS_FILE=""
+
+sha256_of() {
+    if command -v sha256sum &>/dev/null; then sha256sum "$1" | cut -d' ' -f1
+    else shasum -a 256 "$1" | cut -d' ' -f1; fi
+}
+
+prepare_downloads() {
+    RAW_BASE="${TUXAIDE_RAW_BASE:-https://raw.githubusercontent.com/${REPO_SLUG}/${REF}}"
+    if [[ -z "${TUXAIDE_RAW_BASE:-}" ]] && ! curl -fsSI "${RAW_BASE}/agent.py" -o /dev/null 2>/dev/null; then
+        [[ -n "${TUXAIDE_REF:-}" ]] && err "${REF} not found in ${REPO_SLUG}"
+        warn "Release ${REF} isn't published yet — installing from main (no checksums)."
+        REF="main"
+        RAW_BASE="https://raw.githubusercontent.com/${REPO_SLUG}/main"
+        return 0
+    fi
+    SUMS_FILE="$(mktemp)"
+    local web="${TUXAIDE_GITHUB_WEB:-https://github.com}"
+    if curl -fsSL "${web}/${REPO_SLUG}/releases/download/${REF}/SHA256SUMS" -o "$SUMS_FILE" 2>/dev/null; then
+        ok "Downloading from release ${REF} (checked against SHA256SUMS)"
+    else
+        warn "Release ${REF} has no SHA256SUMS — files can't be verified."
+        rm -f "$SUMS_FILE"; SUMS_FILE=""
+    fi
+}
+
 fetch_component() {
     local name="$1" dest="$2"
     local src_dir="$3"
@@ -590,10 +682,29 @@ fetch_component() {
         return 0
     fi
 
-    local repo="${TUXAIDE_REPO:-deltaxmodules/tuxaide}"
-    local ref="${TUXAIDE_REF:-main}"
-    local base_url="${TUXAIDE_RAW_BASE:-https://raw.githubusercontent.com/${repo}/${ref}}"
-    curl -fsSL "${base_url}/${name}" -o "$dest" || return 1
+    [[ -n "$RAW_BASE" ]] || prepare_downloads
+    curl -fsSL "${RAW_BASE}/${name}" -o "$dest" || return 1
+    if [[ -n "$SUMS_FILE" ]]; then
+        local want got
+        want="$(awk -v f="$name" '$2 == f || $2 == "*" f {print $1}' "$SUMS_FILE")"
+        got="$(sha256_of "$dest")"
+        if [[ -z "$want" || "$want" != "$got" ]]; then
+            rm -f "$dest"
+            err "${name} doesn't match the release's SHA256SUMS — download aborted."
+        fi
+    fi
+}
+
+# Download every file and check it against SHA256SUMS before anything else is
+# installed: a bad download stops the installer with nothing changed.
+STAGE=""
+stage_components() {
+    STAGE="$(mktemp -d)"
+    local src_dir name
+    src_dir="$(resolve_source_dir)"
+    for name in agent.py hook.sh session_writer.py uninstall.sh indexer.py; do
+        fetch_component "$name" "${STAGE}/${name}" "$src_dir" || err "Failed to fetch ${name}"
+    done
 }
 
 # When the RAG venv exists, run the script with its Python so chromadb is importable.
@@ -608,8 +719,7 @@ install_agent() {
 
     local BIN="${HOME}/.local/bin"
     local CFG="${HOME}/.config/tuxaide"
-    local SRC_DIR
-    SRC_DIR="$(resolve_source_dir)"
+    local SRC_DIR="$STAGE"
 
     mkdir -p "$BIN" "$CFG"
 
@@ -617,66 +727,6 @@ install_agent() {
     use_venv_python "${BIN}/tuxaide"
     chmod +x "${BIN}/tuxaide"
     ok "Binary installed → ${BIN}/tuxaide"
-
-    local mode_val="llm"
-    [[ "$INSTALL_RAG" == "true" ]] && mode_val="smart"
-
-    # Keeping a resident 4.7 GB model warm on small machines hurts more than it helps.
-    local prewarm_val="once"
-    [[ $RAM_GB -lt 8 ]] && prewarm_val="off"
-
-    # Merge with any existing config: settings the user already has win,
-    # new keys get these defaults. Values are passed as arguments, not interpolated.
-    local cfg_msg
-    cfg_msg=$(python3 - "${CFG}/config.json" "$MODEL" "$mode_val" "$prewarm_val" \
-        "$BACKEND" "$OLLAMA_URL" "$API_BASE" "$API_KEY_ENV" <<'PYEOF'
-import json, os, sys
-path, model, mode, prewarm, backend, ollama_url, api_base, api_key_env = sys.argv[1:9]
-defaults = {
-    "backend": "ollama",
-    "ollama_url": "http://localhost:11434",
-    "api_base": "",
-    "api_key_env": "OPENAI_API_KEY",
-    "model": model,
-    "embed_model": "nomic-embed-text",
-    "max_tokens": 300,
-    "temperature": 0.1,
-    "color": True,
-    "mode": mode,
-    "session_capture": True,
-    "rag_top_k": 1,
-    "rag_timeout": 8,
-    "rag_db_path": "~/.config/tuxaide/vectordb",
-    "enabled": True,
-    "prewarm": prewarm,
-    "keep_alive": "10m",
-    "cache_ttl_days": 30,
-    "action_menu": True,
-    "failure_hint": True,
-    "typo_suggest": True,
-    "followup_window": 600,
-    "followup_turns": 3,
-    "system_context": True,
-}
-existing = {}
-try:
-    with open(path) as f: existing = json.load(f)
-except Exception:
-    pass
-merged = {**defaults, **existing}
-# A remote backend picked in this run wins over older settings. No API key is
-# ever written: it's read from the environment variable named api_key_env.
-if backend == "ollama-remote":
-    merged.update(backend="ollama", ollama_url=ollama_url, model=model, prewarm="off")
-elif backend == "openai":
-    merged.update(backend="openai", api_base=api_base, api_key_env=api_key_env, model=model, prewarm="off")
-tmp = path + ".tmp"
-with open(tmp, "w") as f: json.dump(merged, f, indent=4)
-os.replace(tmp, path)
-print(f"kept existing settings, mode: {merged['mode']}" if existing else f"mode: {merged['mode']}")
-PYEOF
-) || err "Failed to write ${CFG}/config.json"
-    ok "Config → ${CFG}/config.json  (${cfg_msg})"
 
     fetch_component "hook.sh" "${CFG}/hook.sh" "$SRC_DIR" || err "Failed to fetch hook.sh"
     ok "Hook installed → ${CFG}/hook.sh"
@@ -689,102 +739,52 @@ PYEOF
     chmod +x "${BIN}/tuxaide-uninstall"
     ok "Uninstaller → ${BIN}/tuxaide-uninstall"
 
-    if [[ "$INSTALL_RAG" == "true" ]]; then
-        fetch_component "indexer.py" "${BIN}/tuxaide-index" "$SRC_DIR" || err "Failed to fetch indexer.py"
-        use_venv_python "${BIN}/tuxaide-index"
-        chmod +x "${BIN}/tuxaide-index"
-        ok "Indexer installed → ${BIN}/tuxaide-index"
-    fi
+    fetch_component "indexer.py" "${BIN}/tuxaide-index" "$SRC_DIR" || err "Failed to fetch indexer.py"
+    use_venv_python "${BIN}/tuxaide-index"
+    chmod +x "${BIN}/tuxaide-index"
+    ok "Indexer installed → ${BIN}/tuxaide-index"
 }
 # ═══════════════════════════════════════════════════════════════════════
-# STEP 7 — Index man pages (RAG only)
+# STEP 7 — tuxaide setup: settings, model, Smart RAG, shell rc, doctor
 # ═══════════════════════════════════════════════════════════════════════
-index_man_pages() {
-    [[ "$INSTALL_RAG" != "true" ]] && return
+run_setup() {
+    step "Setting up the model and your shell"
 
-    step "Indexing man pages (Smart RAG knowledge base)"
-
-    info "This runs once and takes approximately 5-10 minutes."
-    info "Indexing the top 100 most useful Linux commands..."
-    echo ""
-
-    if "${HOME}/.local/bin/tuxaide-index" --all; then
-        ok "Man pages indexed successfully"
-    else
-        warn "Indexing failed — Smart RAG mode will fallback to LLM automatically"
-        python3 -c "
-import json, os
-f = os.path.expanduser('~/.config/tuxaide/config.json')
-with open(f) as fp: c = json.load(fp)
-c['mode'] = 'llm'
-with open(f, 'w') as fp: json.dump(c, fp, indent=4)
-" 2>/dev/null || true
+    local tux="${HOME}/.local/bin/tuxaide"
+    if [[ "$BACKEND" == "ollama-remote" ]]; then
+        "$tux" --set ollama_url "$OLLAMA_URL"
+    elif [[ "$BACKEND" == "openai" ]]; then
+        "$tux" --set backend openai
+        "$tux" --set api_base "$API_BASE"
+        "$tux" --set api_key_env "$API_KEY_ENV"
     fi
-}
+    [[ "$BACKEND" == "local" ]] || "$tux" --set prewarm off
 
-# ═══════════════════════════════════════════════════════════════════════
-# STEP 8 — Activate in shell
-# ═══════════════════════════════════════════════════════════════════════
-activate_shell() {
-    step "Activating in shell"
-
-    local CFG="${HOME}/.config/tuxaide"
-    local BIN="${HOME}/.local/bin"
-    local HOOK_LINE="source \"${CFG}/hook.sh\"  # TuxAide"
-    local PATH_LINE="export PATH=\"\$HOME/.local/bin:\$PATH\"  # TuxAide"
-
-    local -a RCS=()
-    [[ "$CURRENT_SHELL" == "zsh"  ]] && RCS+=("${HOME}/.zshrc")
-    [[ "$CURRENT_SHELL" == "bash" ]] && RCS+=("${HOME}/.bashrc")
-    [[ ${#RCS[@]} -eq 0 ]] && RCS=("${HOME}/.bashrc" "${HOME}/.zshrc")
-
-    for RC in "${RCS[@]}"; do
-        [[ -f "$RC" ]] || touch "$RC"
-        if ! grep -qF "local/bin" "$RC" 2>/dev/null; then
-            echo "$PATH_LINE" >> "$RC"
-            ok "PATH added to $RC"
-        fi
-        if grep -qF "tuxaide/hook.sh" "$RC" 2>/dev/null; then
-            ok "Hook already present in $RC"
-        else
-            { echo ""; echo "$HOOK_LINE"; } >> "$RC"
-            ok "Hook added to $RC"
-        fi
-    done
-
-    export PATH="${HOME}/.local/bin:${PATH}"
-    # shellcheck disable=SC1090
-    source "${CFG}/hook.sh"
-    ok "Hook active in current session"
-}
-
-# ═══════════════════════════════════════════════════════════════════════
-# STEP 9 — Final check and summary
-# ═══════════════════════════════════════════════════════════════════════
-final_check() {
-    step "Final check"
-    # The same checks as `tuxaide doctor`, which users can run again any time.
-    if "${HOME}/.local/bin/tuxaide" doctor; then
-        echo -e "${GR}${BOLD}  ✓ Everything installed!${R}"
-    else
-        echo -e "${YL}  ⚠ Some checks failed — the lines with → say how to fix them${R}"
-    fi
-    return 0
+    local -a args=(--yes)
+    # A model picked here (command line, remote choice) is set; otherwise
+    # setup keeps the current one or picks the one for this RAM.
+    [[ -n "$MODEL_OVERRIDE" || "$BACKEND" != "local" ]] && args+=(--model "$MODEL")
+    if [[ "$INSTALL_RAG" == "true" ]]; then args+=(--rag); else args+=(--no-rag); fi
+    local sh="$CURRENT_SHELL"
+    [[ "$sh" == "zsh" || "$sh" == "bash" ]] || sh="bash"
+    args+=(--shell "$sh")
+    "$tux" setup "${args[@]}" || warn "tuxaide setup reported a problem — see above"
 }
 
 print_summary() {
     local mode_label="LLM only"
-    [[ "$INSTALL_RAG" == "true" ]] && mode_label="Smart RAG (uses local docs only when needed)"
+    [[ "$INSTALL_RAG" == "true" ]] && mode_label="Smart RAG (man pages being indexed in the background)"
 
     echo ""
     echo -e "${CY}${BOLD}╔══════════════════════════════════════════════════════╗${R}"
     echo -e "${CY}${BOLD}║   🐧  TuxAide ${TUXAIDE_VERSION} installed and ready!            ║${R}"
     echo -e "${CY}${BOLD}╚══════════════════════════════════════════════════════╝${R}"
     echo ""
-    echo -e "  ${YL}${BOLD}⚡ Required — run this now to activate:${R}"
+    local rc="bashrc"
+    [[ "$CURRENT_SHELL" == "zsh" ]] && rc="zshrc"
+    echo -e "  ${YL}${BOLD}⚡ Open a new terminal, or run this now to activate:${R}"
     echo ""
-    echo -e "  ${BOLD}    source ~/.bashrc${R}    ${DIM}# Linux${R}"
-    echo -e "  ${BOLD}    source ~/.zshrc${R}     ${DIM}# macOS${R}"
+    echo -e "  ${BOLD}    source ~/.${rc}${R}"
     echo ""
     echo -e "  ${DIM}(Future sessions activate automatically.)${R}"
     echo ""
@@ -805,7 +805,7 @@ print_summary() {
     echo -e "  ${CY}tuxaide how to check open ports${R}   ← explicit mode"
     echo ""
     echo -e "  ${BOLD}Mode control:${R}"
-    echo -e "  ${CY}tuxaide mode smart${R} — Smart RAG (default, recommended)"
+    echo -e "  ${CY}tuxaide mode smart${R} — Smart RAG (recommended)"
     echo -e "  ${CY}tuxaide mode deep${R}  — full RAG for every question"
     echo -e "  ${CY}tuxaide mode llm${R}   — LLM only, no man pages"
     echo -e "  ${CY}tuxaide status${R}     — show current mode"
@@ -819,7 +819,7 @@ print_summary() {
         echo -e "  ${CY}tuxaide index nginx${R}  — index a specific command"
     fi
     echo ""
-    echo -e "  ${BOLD}Uninstall:${R}  ${CY}tuxaide-uninstall${R}"
+    echo -e "  ${BOLD}Uninstall:${R}  ${CY}tuxaide uninstall${R}"
     echo ""
     echo -e "  ${DIM}Config: ~/.config/tuxaide/config.json${R}"
     echo -e "  ${DIM}Perf log: ~/.config/tuxaide/logs/perf.log${R}"
@@ -833,14 +833,13 @@ main() {
     banner
     diagnose_system
     ask_rag
+    show_plan
     install_dependencies
+    stage_components
     install_ollama
     start_ollama
-    download_models
     install_agent
-    index_man_pages
-    activate_shell
-    final_check || true
+    run_setup
     print_summary || true
 }
 

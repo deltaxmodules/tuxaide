@@ -1,0 +1,23 @@
+# Maintainer: deltaXmodules <https://github.com/deltaxmodules>
+# AUR package template. scripts/render-packaging.sh fills in the version and
+# checksum; the result (plus .SRCINFO) is pushed to aur.archlinux.org/tuxaide.git.
+pkgname=tuxaide
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc="Ask your terminal in plain English: local AI assistant for bash and zsh"
+arch=('any')
+url="https://github.com/deltaxmodules/tuxaide"
+license=('MIT')
+depends=('python' 'ollama')
+install=tuxaide.install
+source=("$pkgname-$pkgver.tar.gz::@URL@")
+sha256sums=('@SHA256@')
+
+package() {
+    cd "$pkgname-$pkgver"
+    install -Dm755 agent.py          "$pkgdir/usr/bin/tuxaide"
+    install -Dm755 indexer.py        "$pkgdir/usr/bin/tuxaide-index"
+    install -Dm644 hook.sh           "$pkgdir/usr/share/tuxaide/hook.sh"
+    install -Dm644 session_writer.py "$pkgdir/usr/share/tuxaide/session_writer.py"
+    install -Dm644 LICENSE           "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

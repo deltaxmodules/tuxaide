@@ -28,7 +28,8 @@ def home(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(h))
     for var in ("TUXAIDE_SHELL_PID", "TUXAIDE_SHELL", "TUXAIDE_LAST_CMD",
                 "TUXAIDE_LAST_RC", "TUXAIDE_NAMES", "TUXAIDE_HANDLER", "TUXAIDE_REPO",
-                "TUXAIDE_GITHUB_API", "TUXAIDE_GITHUB_RAW", "OPENAI_API_KEY",
+                "TUXAIDE_GITHUB_API", "TUXAIDE_GITHUB_RAW", "TUXAIDE_GITHUB_WEB", "OPENAI_API_KEY",
+                "TUXAIDE_PREV_CNF", "TUXAIDE_IN_VENV",
                 "LC_ALL", "LC_MESSAGES"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("LANG", "en_US.UTF-8")
@@ -145,6 +146,7 @@ class FakeGitHub:
     def __init__(self):
         self.tag = "v9.9.9"
         self.files = {}
+        self.sums = None        # text of the release's SHA256SUMS asset, or None (404)
         self.requests = []
         fake = self
 
@@ -154,7 +156,13 @@ class FakeGitHub:
 
             def do_GET(self):
                 fake.requests.append(self.path)
-                if self.path == f"/api/repos/{fake.REPO}/releases/latest":
+                if self.path == f"/web/{fake.REPO}/releases/download/{fake.tag}/SHA256SUMS":
+                    if fake.sums is None:
+                        self.send_response(404)
+                        self.end_headers()
+                        return
+                    body = fake.sums.encode()
+                elif self.path == f"/api/repos/{fake.REPO}/releases/latest":
                     body = json.dumps({"tag_name": fake.tag,
                                        "html_url": f"https://example.invalid/{fake.tag}"}).encode()
                 else:
@@ -172,7 +180,7 @@ class FakeGitHub:
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         url = f"http://127.0.0.1:{self.server.server_address[1]}"
         self.env = {"TUXAIDE_GITHUB_API": f"{url}/api", "TUXAIDE_GITHUB_RAW": f"{url}/raw",
-                    "TUXAIDE_REPO": self.REPO}
+                    "TUXAIDE_GITHUB_WEB": f"{url}/web", "TUXAIDE_REPO": self.REPO}
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
     def release(self, version, hook_extra=""):
@@ -184,6 +192,11 @@ class FakeGitHub:
         self.files["agent.py"] = re.sub(r'^__version__ = "[^"]+"', f'__version__ = "{version}"',
                                         self.files["agent.py"], count=1, flags=re.M)
         self.files["hook.sh"] += hook_extra
+
+    def sign(self):
+        """Publish a SHA256SUMS matching the current files."""
+        import hashlib
+        self.sums = "".join(f"{hashlib.sha256(c.encode()).hexdigest()}  {n}\n" for n, c in self.files.items())
 
     def close(self):
         self.server.shutdown()

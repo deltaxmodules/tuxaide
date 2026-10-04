@@ -5,11 +5,17 @@ import os, sys, json, re, subprocess, urllib.request, urllib.error
 try:
     import chromadb
 except ImportError:
-    print("Error: chromadb not installed. Re-run the TuxAide installer and answer Y to Smart RAG.")
+    # Homebrew / AUR run this with the system Python; chromadb lives in TuxAide's venv.
+    _venv = os.path.expanduser("~/.local/share/tuxaide/venv/bin/python")
+    if os.access(_venv, os.X_OK) and not os.environ.get("TUXAIDE_IN_VENV"):
+        os.environ["TUXAIDE_IN_VENV"] = "1"
+        os.execv(_venv, [_venv, os.path.realpath(__file__), *sys.argv[1:]])
+    print("Error: chromadb not installed. Enable Smart RAG with: tuxaide setup --rag")
     sys.exit(1)
 
 CFG_FILE = os.path.expanduser("~/.config/tuxaide/config.json")
 DB_PATH  = os.path.expanduser("~/.config/tuxaide/vectordb")
+PID_FILE = os.path.expanduser("~/.config/tuxaide/index.pid")   # written by `tuxaide setup`
 BATCH    = 32   # chunks embedded per request
 
 # Top 100 most useful man pages for Linux beginners
@@ -169,6 +175,12 @@ def main():
         total += n
     print()
     print(f"✓ Indexing complete — {total} total chunks stored")
-    print("  Run 'tuxaide mode smart' to activate Smart RAG mode")
+    print("  Smart RAG uses it now (if it's off: tuxaide mode smart)")
+    try:   # a background run started by `tuxaide setup` is over
+        with open(PID_FILE) as f:
+            if f.read().strip() == str(os.getpid()):
+                os.remove(PID_FILE)
+    except OSError:
+        pass
 
 if __name__ == "__main__": main()

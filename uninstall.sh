@@ -1,23 +1,13 @@
 #!/usr/bin/env bash
-R="\033[0m"; GR="\033[32m"; RD="\033[31m"; YL="\033[33m"; BOLD="\033[1m"
-echo ""
-echo -e "${RD}${BOLD}  🐧  TuxAide — Uninstall${R}"
-echo ""
-read -rp "  Are you sure? This removes TuxAide completely. [y/N] " a
-[[ "$a" =~ ^[yYsS]$ ]] || { echo "  Cancelled."; exit 0; }
-for rc in ~/.bashrc ~/.zshrc ~/.profile; do
-    [[ -f "$rc" ]] || continue
-    grep -v "TuxAide" "$rc" > /tmp/_tux_rc && mv /tmp/_tux_rc "$rc"
-    echo -e "  ${GR}✓${R} Removed from $rc"
+# TuxAide uninstaller (installed as ~/.local/bin/tuxaide-uninstall).
+# The work is done by `tuxaide uninstall`: it removes only the lines TuxAide
+# added to your shell rc files (keeping a backup) and TuxAide's own files.
+#   tuxaide-uninstall [--yes] [--keep-data]
+for agent in "${HOME}/.local/bin/tuxaide" "$(command -v tuxaide 2>/dev/null)"; do
+    if [[ -n "$agent" && -x "$agent" ]]; then
+        exec "$agent" uninstall "$@"
+    fi
 done
-rm -f ~/.local/bin/tuxaide ~/.local/bin/tuxaide-index ~/.local/bin/tuxaide-uninstall
-rm -f ~/.config/tuxaide/session.json ~/.config/tuxaide/session_writer.py ~/.config/tuxaide/session.lock
-rm -rf ~/.config/tuxaide
-rm -rf ~/.local/share/tuxaide   # RAG virtualenv (chromadb)
-echo -e "  ${GR}✓${R} Files removed"
-echo ""
-echo -e "  ${YL}Note: Ollama and models were NOT removed.${R}"
-echo -e "  ${YL}To remove: sudo systemctl stop ollama && sudo rm \$(which ollama)${R}"
-echo ""
-echo -e "  ${GR}${BOLD}Done. Restart your terminal.${R}"
-echo ""
+echo "TuxAide's program wasn't found, so there is nothing to uninstall." >&2
+echo "If your shell rc still loads it, delete the lines between '# >>> TuxAide >>>' and '# <<< TuxAide <<<'." >&2
+exit 1

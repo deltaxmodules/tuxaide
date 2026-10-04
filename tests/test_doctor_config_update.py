@@ -188,7 +188,7 @@ def test_doctor_warnings_dont_fail(run_agent, healthy, home):
     env["PATH"] = os.environ["PATH"]
     r = run_agent("doctor", env=env, config={"enabled": False, "prewarm": "sometimes"})
     assert r.returncode == 0, r.stdout
-    for text in ("turned off", "prewarm", "isn't loaded in this terminal", "isn't on your PATH"):
+    for text in ("turned off", "prewarm", "isn't loaded in this terminal"):
         assert text in r.stdout
 
 
@@ -327,3 +327,21 @@ def test_smaller_model_hint_is_really_smaller(agent):
     assert agent.smaller_model_hint(1_929_911_945).endswith("qwen2.5:1.5b")       # 3b → 1.5b
     assert agent.smaller_model_hint(986_061_405).endswith("qwen2.5:0.5b")         # 1.5b → 0.5b
     assert "Remote backends" in agent.smaller_model_hint(397_820_829)            # nothing smaller
+
+
+def test_update_checks_sha256sums(installed, github):
+    github.release("9.9.9")
+    github.sign()
+    r = run_installed(installed, github)
+    assert r.returncode == 0, r.stdout
+    assert '__version__ = "9.9.9"' in (installed / ".local" / "bin" / "tuxaide").read_text()
+
+
+def test_update_refuses_a_checksum_mismatch(installed, github):
+    github.release("9.9.9")
+    github.sign()
+    github.files["hook.sh"] += "\n# tampered\n"
+    before = (installed / ".config" / "tuxaide" / "hook.sh").read_text()
+    r = run_installed(installed, github)
+    assert r.returncode == 1 and "doesn't match" in r.stdout and "Nothing was changed" in r.stdout
+    assert (installed / ".config" / "tuxaide" / "hook.sh").read_text() == before
