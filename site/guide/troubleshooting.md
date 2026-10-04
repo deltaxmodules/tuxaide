@@ -38,7 +38,7 @@ tuxaide update --check    # is there a newer release?
 tuxaide update            # download it, keeping settings, history and cache
 ```
 
-The new files are checked against the release's `SHA256SUMS` before anything is replaced, and the new hook is loaded into the current terminal. With Homebrew, the AUR or pipx, update with them instead (`brew upgrade tuxaide`, `yay -Syu`, `pipx upgrade tuxaide`) — `tuxaide update` tells you so.
+The new files are checked against the release's `SHA256SUMS` before anything is replaced, and the new hook is loaded into the current terminal. With Homebrew, the AUR or pipx, update with them instead (`brew upgrade tuxaide`, `pacman`, or the new release's PKGBUILD on Arch, `pipx upgrade tuxaide`) — `tuxaide update` tells you so.
 
 ## FAQ
 

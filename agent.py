@@ -1715,7 +1715,7 @@ def install_kind():
 UPGRADE_HINT = {
     "homebrew": "brew upgrade tuxaide",
     "pipx":     "pipx upgrade tuxaide",
-    "system":   "your package manager (e.g. yay -Syu tuxaide)",
+    "system":   "your package manager (on Arch: the new release's PKGBUILD, makepkg -si)",
     "checkout": "git pull",
 }
 

@@ -65,7 +65,7 @@ Options: `… | bash -s -- --yes` (no questions), `--no-rag`, `--model <name>`.
 | | |
 | --- | --- |
 | Homebrew (macOS, Linux) | `brew install deltaxmodules/tap/tuxaide` |
-| Arch Linux (AUR) | `yay -S tuxaide` |
+| Arch Linux | `mkdir tuxaide && cd tuxaide && curl -fL --remote-name-all https://github.com/deltaxmodules/tuxaide/releases/latest/download/{PKGBUILD,tuxaide.install} && makepkg -si` (the AUR package is waiting for AUR sign-ups to reopen) |
 | pipx (any system with Python 3.9+) | `pipx install tuxaide` — with Smart RAG: `pipx install 'tuxaide[rag]'` |
 
 Then open a new terminal and type a question. Something off? Run **`tuxaide doctor`**: it checks

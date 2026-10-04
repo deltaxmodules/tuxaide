@@ -31,8 +31,14 @@ curl -fsSL https://raw.githubusercontent.com/deltaxmodules/tuxaide/main/setup.sh
 | | Install | Then |
 | --- | --- | --- |
 | Homebrew (macOS, Linux) | `brew install deltaxmodules/tap/tuxaide` | `brew services start ollama`, `tuxaide setup` |
-| Arch Linux (AUR) | `yay -S tuxaide` | `sudo systemctl enable --now ollama`, `tuxaide setup` |
+| Arch Linux | the PKGBUILD from the release (below) | `sudo systemctl enable --now ollama`, `tuxaide setup` |
 | pipx (any system with Python 3.9+) | `pipx install tuxaide` (Smart RAG: `pipx install 'tuxaide[rag]'`) | install [Ollama](https://ollama.com/download), `tuxaide setup` |
+
+On Arch, until the AUR package is published (AUR sign-ups are paused), build it from the release's PKGBUILD:
+
+```bash
+mkdir tuxaide && cd tuxaide && curl -fL --remote-name-all https://github.com/deltaxmodules/tuxaide/releases/latest/download/{PKGBUILD,tuxaide.install} && makepkg -si
+```
 
 `tuxaide setup` does the part a package can't: it picks and downloads the model, offers Smart RAG, and adds TuxAide to your shell. Options: `--yes`, `--model <name>`, `--rag` / `--no-rag`, `--shell zsh|bash`. You can run it again any time.
 

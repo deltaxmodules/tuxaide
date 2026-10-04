@@ -46,7 +46,7 @@ AUR or pipx.
   environment variable and never stored.
 
 ### Installing
-- Homebrew (`brew install deltaxmodules/tap/tuxaide`), AUR (`yay -S tuxaide`)
+- Homebrew (`brew install deltaxmodules/tap/tuxaide`), a PKGBUILD for Arch (AUR package to follow)
   and pipx (`pipx install tuxaide`, extra `[rag]`).
 - The curl installer shows everything it will do and asks once; `--yes`,
   `--no-rag`, `--model`; files come from the release tag and are checked
