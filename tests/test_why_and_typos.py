@@ -126,3 +126,33 @@ def test_not_found_exit_codes(run_agent, ollama, fake_path):
     assert p.returncode == 0 and "Use ls." in p.stdout
     p = run_agent("--not-found", "gti", "status", env=env, config={"typo_suggest": False})
     assert p.returncode == 1
+
+
+@pytest.fixture
+def fake_helper(agent, tmp_path, monkeypatch):
+    """Stand-in for Debian/Ubuntu's /usr/lib/command-not-found."""
+    helper = tmp_path / "command-not-found"
+    helper.write_text(
+        "#!/bin/sh\n"
+        'case "$2" in\n'
+        "  htop) echo \"Command 'htop' not found, but can be installed with:\" >&2;"
+        " echo 'sudo apt install htop' >&2 ;;\n"
+        '  *) echo "$2: command not found" >&2 ;;\n'
+        "esac\nexit 127\n")
+    helper.chmod(0o755)
+    monkeypatch.setattr(agent, "CNF_HELPER", str(helper))
+    return helper
+
+
+def test_distro_package_hint_comes_first(agent, fake_path, fake_helper, capsys):
+    (fake_path / "top").write_text("#!/bin/sh\n")
+    (fake_path / "top").chmod(0o755)
+    assert agent.suggest_main("htop") == 0
+    err = capsys.readouterr().err
+    assert err.index("sudo apt install htop") < err.index("Did you mean: top")
+    assert "bash: htop: command not found" not in err      # the helper already said it
+
+
+def test_bare_distro_message_is_ignored(agent, fake_path, fake_helper, capsys):
+    assert agent.suggest_main("xyzzyq") == 1                # shell prints its own message
+    assert capsys.readouterr().err == ""

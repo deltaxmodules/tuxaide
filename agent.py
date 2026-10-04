@@ -949,6 +949,20 @@ def mark_pending(kind):
         except OSError:
             pass
 
+CNF_HELPER = "/usr/lib/command-not-found"
+
+def command_not_found_helper(typed):
+    """The distro's own hint for a missing command, or "" when it has nothing
+    to offer (its bare "x: command not found" adds nothing)."""
+    if not typed or not os.path.exists(CNF_HELPER):
+        return ""
+    try:
+        p = subprocess.run([CNF_HELPER, "--", typed], capture_output=True, text=True, timeout=5)
+    except Exception:
+        return ""
+    msg = (p.stderr or p.stdout).strip()
+    return msg if "install" in msg or "did you mean" in msg.lower() else ""
+
 def suggest_main(line, extra=()):
     """Handle an unknown command that isn't a question. 0 if we printed the
     message ourselves, 1 to let the shell print its usual "command not found"."""
@@ -957,21 +971,15 @@ def suggest_main(line, extra=()):
         return 1
     fixed = suggest_fix(line, extra)
     typed = (line.split() or [""])[0]
+    # Debian/Ubuntu know which package provides a missing command ("htop" →
+    # "apt install htop"). Show that first; a typo fix, if any, comes after.
+    packaged = command_not_found_helper(typed)
+    if packaged:
+        print(packaged, file=sys.stderr)
     if not fixed:
-        # Ubuntu/Debian: "Command 'htop' not found, but can be installed with: ..."
-        helper = "/usr/lib/command-not-found"
-        if typed and os.path.exists(helper):
-            try:
-                p = subprocess.run([helper, "--", typed], capture_output=True, text=True, timeout=5)
-                msg = (p.stderr or p.stdout).strip()
-                if msg:
-                    print(msg, file=sys.stderr)
-                    return 0
-            except Exception:
-                pass
-        return 1
-
-    print(not_found_message(typed), file=sys.stderr)
+        return 0 if packaged else 1
+    if not packaged:
+        print(not_found_message(typed), file=sys.stderr)
     bold, reset = (C.B, C.Z) if c.get("color", True) and sys.stderr.isatty() else ("", "")
     hint = f"🐧 Did you mean: {bold}{fixed}{reset}"
     tty = None

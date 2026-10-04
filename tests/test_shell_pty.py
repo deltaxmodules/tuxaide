@@ -128,6 +128,9 @@ def sh(request, home, ollama):
     rc = (f'export PATH="{path}"\nalias myalias="echo hi"\nPS1="PROMPT> "\n'
           'source ~/.config/tuxaide/hook.sh\n')
     (home / ".zshrc").write_text(rc + "PROMPT='PROMPT> '\nunsetopt PROMPT_SP\n")
+    # Debian/Ubuntu's global zshrc runs compinit, which can stop at an
+    # "insecure directories" question on CI runners.
+    (home / ".zshenv").write_text("skip_global_compinit=1\n")
     (home / ".bashrc").write_text(rc)
     ollama.answer = "Use:\n\n```bash\nls -laSh\nls -laShr\n```\n"
     shell = Shell(request.param, home)
