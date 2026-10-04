@@ -28,7 +28,8 @@ def home(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(h))
     for var in ("TUXAIDE_SHELL_PID", "TUXAIDE_SHELL", "TUXAIDE_LAST_CMD",
                 "TUXAIDE_LAST_RC", "TUXAIDE_NAMES", "TUXAIDE_HANDLER", "TUXAIDE_REPO",
-                "TUXAIDE_GITHUB_API", "TUXAIDE_GITHUB_RAW", "LC_ALL", "LC_MESSAGES"):
+                "TUXAIDE_GITHUB_API", "TUXAIDE_GITHUB_RAW", "OPENAI_API_KEY",
+                "LC_ALL", "LC_MESSAGES"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("LANG", "en_US.UTF-8")
     return h
@@ -191,5 +192,63 @@ class FakeGitHub:
 @pytest.fixture
 def github():
     server = FakeGitHub()
+    yield server
+    server.close()
+
+
+class FakeOpenAI:
+    """An OpenAI-compatible server: GET /v1/models, streaming POST /v1/chat/completions.
+    Keeps every request's headers and body; `status` makes chat fail with that code."""
+    def __init__(self):
+        self.answer = "ok"
+        self.models = ["gpt-test"]
+        self.status = 200
+        self.requests = []
+        fake = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def _json(self, code, payload):
+                self.send_response(code)
+                self.end_headers()
+                self.wfile.write(json.dumps(payload).encode())
+
+            def do_GET(self):
+                fake.requests.append((self.path, dict(self.headers), None))
+                if self.path == "/v1/models":
+                    return self._json(200, {"data": [{"id": m} for m in fake.models]})
+                self._json(404, {})
+
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                fake.requests.append((self.path, dict(self.headers), body))
+                if self.path != "/v1/chat/completions":
+                    return self._json(404, {})
+                if fake.status != 200:
+                    auth = self.headers.get("Authorization", "")
+                    return self._json(fake.status, {"error": {"message": f"Incorrect API key provided: {auth[7:]}"}})
+                self.send_response(200)
+                self.end_headers()
+                for i in range(0, len(fake.answer), 7):
+                    chunk = {"choices": [{"delta": {"content": fake.answer[i:i + 7]}}]}
+                    self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+                self.wfile.write(b"data: [DONE]\n\n")
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}/v1"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def chats(self):
+        return [(headers, body) for path, headers, body in self.requests if path == "/v1/chat/completions"]
+
+    def close(self):
+        self.server.shutdown()
+
+
+@pytest.fixture
+def openai_api():
+    server = FakeOpenAI()
     yield server
     server.close()

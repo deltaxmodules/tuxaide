@@ -1,7 +1,7 @@
 # 🐧 TuxAide
 
 > **Stop searching. Just ask your terminal.**
-> No trigger word. No cloud. No command execution by TuxAide. Just ask your terminal in plain English.
+> No trigger word. No cloud by default. No command execution by TuxAide. Just ask your terminal in plain English.
 
 <div align="center">
 
@@ -115,7 +115,9 @@ You don’t type `ask`, `hey` or anything else. Just write your question — Tux
 Safer by design. You stay in control of what runs on your system.
 
 **4. 100% local by default.**
-No API key. No account. No cloud. Nothing leaves your machine — ever.
+No API key. No account. No cloud. Nothing leaves your machine — unless you
+explicitly choose a [remote backend](#remote-backends-optional), and then every
+answer is marked **☁ remote**.
 
 **5. One command installs everything.**
 Ollama, model, shell hook — all in one command.
@@ -224,6 +226,10 @@ in the current terminal too) or `tuxaide config reset <key>`; `tuxaide config` l
 | `followup_window` | `600` | Seconds a conversation stays open for follow-ups (`0` turns them off) |
 | `followup_turns` | `3` | How many previous exchanges are sent with a follow-up |
 | `system_context` | `true` | Tell the model your OS, package manager, shell and init system |
+| `backend` | `ollama` | `ollama`, or `openai` for an OpenAI-compatible API ([remote backends](#remote-backends-optional)) |
+| `ollama_url` | `http://localhost:11434` | Where Ollama runs |
+| `api_base` | — | Backend `openai`: the API address, e.g. `http://localhost:1234/v1` |
+| `api_key_env` | `OPENAI_API_KEY` | Backend `openai`: the environment variable that holds the API key |
 
 Smart RAG's Python dependencies (ChromaDB) are installed in TuxAide's own virtualenv at `~/.local/share/tuxaide/venv`, never in your system Python, so no `pip` command is needed. `tuxaide-uninstall` removes it.
 
@@ -262,6 +268,42 @@ tuxaide update            # download it, keeping settings, history and cache
 TuxAide only contacts GitHub when you run `tuxaide update` — it never checks for
 updates on its own. The new files are downloaded and checked before anything is
 replaced, and the new hook is loaded into the current terminal.
+
+## Remote backends (optional)
+
+TuxAide is local by default and stays that way unless you change it. If your
+machine is too small for a local model, or you already run a model server, you
+can point TuxAide at it. Whenever questions leave your computer, every answer
+says so — `☁ remote · <host>` in the answer header, `☁ Asking <host>` while it
+waits — and `tuxaide status` and `tuxaide doctor` warn about it.
+
+**Ollama on another computer in your network**
+
+```bash
+# on the other computer: OLLAMA_HOST=0.0.0.0 ollama serve
+tuxaide config set ollama_url http://192.168.1.10:11434
+tuxaide model              # pick one of its models
+```
+
+**Any OpenAI-compatible API** — LM Studio, llama.cpp server, vLLM, or a cloud service:
+
+```bash
+tuxaide config set backend openai
+tuxaide config set api_base http://localhost:1234/v1     # LM Studio on this machine: stays local
+tuxaide model                                           # the models the API offers
+```
+
+For a service that needs a key, put it in an environment variable in your shell
+rc — TuxAide reads it from there and never writes it to any file:
+
+```bash
+echo 'export OPENAI_API_KEY=sk-…' >> ~/.zshrc
+tuxaide config set api_key_env MY_KEY_VAR   # if your variable has another name
+```
+
+Back to fully local: `tuxaide config reset backend` and `tuxaide config reset ollama_url`.
+Smart RAG needs a local Ollama for its embeddings; with the `openai` backend it
+still uses `ollama_url` for them.
 
 ## Answers for your system
 
@@ -347,7 +389,8 @@ tuxaide "porque deu este erro?"
 
 ### Privacy
 
-- all captured context is local-only
+- all captured context stays on your machine (with a remote backend, the question
+  and the context it needs are sent to that backend, marked ☁)
 - no cloud sync
 - no external telemetry
 
@@ -355,8 +398,8 @@ tuxaide "porque deu este erro?"
 
 ## 🔒 Data Sovereignty
 
-* Fully local processing via Ollama
-* No external calls
+* Fully local processing via Ollama (by default)
+* No external calls unless you configure a remote backend — and then every answer shows ☁
 * No tracking
 * Works offline after install
 * Designed for data-sovereign and offline environments
@@ -374,7 +417,17 @@ tuxaide "porque deu este erro?"
 | ARM / Raspberry Pi | ✅       |
 
 Shells: bash, zsh
-RAM: 5GB minimum (8GB recommended)
+
+The installer picks the model that fits your RAM:
+
+| RAM | Model | Download | Answers |
+| --- | --- | --- | --- |
+| 8 GB or more | `qwen2.5-coder:7b` | 4.7 GB | Best |
+| 5–8 GB | `qwen2.5:3b` | 1.9 GB | Good |
+| 3–5 GB | `qwen2.5:1.5b` | 986 MB | Simpler, but usable |
+| under 3 GB | `qwen2.5:0.5b`, or a [remote backend](#remote-backends-optional) | 398 MB | Basic |
+
+Smart RAG needs 5 GB or more. Switch models any time with `tuxaide model <name>`.
 
 ---
 

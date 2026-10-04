@@ -18,7 +18,10 @@ BIN_DIR      = os.path.expanduser("~/.local/bin")
 __version__ = "2.3.0"
 
 DEFAULTS = {
+    "backend":      "ollama",  # "ollama", or "openai" for any OpenAI-compatible API
     "ollama_url":   "http://localhost:11434",
+    "api_base":     "",        # backend "openai": e.g. http://localhost:1234/v1 (LM Studio)
+    "api_key_env":  "OPENAI_API_KEY",  # the API key is read from this variable, never stored
     "model":        "qwen2.5-coder:7b",
     "embed_model":  "nomic-embed-text",
     "max_tokens":   300,
@@ -86,6 +89,11 @@ def _parse_url(v):
         raise ValueError("expected a URL like http://localhost:11434")
     return v.rstrip("/")
 
+def _parse_env_name(v):
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", v):
+        raise ValueError("expected the name of an environment variable, like OPENAI_API_KEY")
+    return v
+
 def _parse_duration(v):
     # Ollama's keep_alive: "30s", "10m", "1h", "0" (unload at once), "-1" (keep forever)
     if not re.fullmatch(r"-1|0|\d+[smh]", v):
@@ -96,9 +104,12 @@ def _parse_duration(v):
 SETTABLE = {
     "enabled":         _parse_bool,
     "mode":            _parse_choice("llm", "smart", "deep"),
+    "backend":         _parse_choice("ollama", "openai"),
     "model":           _parse_model,
     "embed_model":     _parse_model,
     "ollama_url":      _parse_url,
+    "api_base":        _parse_url,
+    "api_key_env":     _parse_env_name,
     "session_capture": _parse_bool,
     "color":           _parse_bool,
     "prewarm":         _parse_choice("off", "once", "always"),
@@ -430,7 +441,7 @@ def explain_last_command(c, cmd, rc, user_q=""):
     if run_it and rerun_rc is not None and rerun_rc != rc:
         effective_q += f"\n(Note: when re-run just now it exited with {rerun_rc}.)\n"
 
-    spinner = Spinner().start()
+    spinner = thinking(c)
     answer, ok, _, commands = answer_streaming(effective_q, c, None, "llm", spinner)
     if ok:   # so "and how do I fix it?" can follow
         save_turn(f"{user_q or default_why_question()}\n(about the command: {cmd}, exit code {rc})", answer)
@@ -541,7 +552,8 @@ def cache_key(text):
 
 def answer_cache_key(norm_q, c):
     """Answers depend on the model, the configured mode and the system, not just the question."""
-    return cache_key(f"{c.get('model')}|{c.get('mode', 'llm')}|{system_summary(c)}|{norm_q}")
+    backend = "" if c.get("backend", "ollama") == "ollama" else f"{c.get('backend')}@{c.get('api_base')}|"
+    return cache_key(f"{backend}{c.get('model')}|{c.get('mode', 'llm')}|{system_summary(c)}|{norm_q}")
 
 # ── The user's system, so answers fit it ("dnf" on Fedora, "brew" on macOS)
 # Only generic facts: never user names, host names or paths.
@@ -772,21 +784,95 @@ def build_prompt(passages=None, system=""):
     return base
 
 # ── Ollama query ──────────────────────────────────────────────────────
-class OllamaError(Exception):
+class ModelError(Exception):
     pass
 
+OllamaError = ModelError   # older name
+
+def chat_messages(q, c, passages=None, history=None):
+    return [
+        {"role": "system", "content": build_prompt(passages, system_summary(c))},
+        *(history or []),
+        {"role": "user",   "content": q + (
+            "\n\n[Important: end your answer with exactly: Source: <man page name>]"
+            if passages else ""
+        )}
+    ]
+
+def stream_answer(q, c, passages=None, history=None):
+    """Yield answer text chunks from the configured backend. Raises ModelError."""
+    if c.get("backend") == "openai":
+        return stream_openai(q, c, passages, history)
+    return stream_ollama(q, c, passages, history)
+
+def api_key(c):
+    """The API key, from the environment only — never from a file."""
+    return os.environ.get(c.get("api_key_env") or DEFAULTS["api_key_env"], "").strip()
+
+def _scrub(text, c):
+    key = api_key(c)
+    return text.replace(key, "***") if key else text
+
+def _api_request(c, path, payload=None):
+    headers = {"Content-Type": "application/json", "User-Agent": f"tuxaide/{__version__}"}
+    key = api_key(c)
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    data = json.dumps(payload).encode() if payload is not None else None
+    return urllib.request.Request(f"{c.get('api_base', '').rstrip('/')}{path}", data=data,
+                                  headers=headers, method="POST" if data else "GET")
+
+def stream_openai(q, c, passages=None, history=None):
+    """Yield answer chunks from an OpenAI-compatible /chat/completions (LM Studio,
+    llama.cpp server, vLLM, cloud services). Raises ModelError."""
+    if not c.get("api_base"):
+        raise ModelError("No API address set. Set one with: tuxaide config set api_base <url>")
+    pay = {"model": c["model"], "messages": chat_messages(q, c, passages, history),
+           "temperature": c.get("temperature", 0.1), "max_tokens": c.get("max_tokens", 300),
+           "stream": True}
+    try:
+        with urllib.request.urlopen(_api_request(c, "/chat/completions", pay), timeout=60) as r:
+            for ln in r:
+                ln = ln.decode("utf-8", "replace").strip()
+                if not ln.startswith("data:"):
+                    continue
+                data = ln[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    msg = json.loads(data)
+                except ValueError:
+                    continue
+                if msg.get("error"):
+                    err = msg["error"]
+                    raise ModelError(_scrub(err.get("message", str(err)) if isinstance(err, dict) else str(err), c))
+                for choice in msg.get("choices") or []:
+                    chunk = (choice.get("delta") or {}).get("content") or ""
+                    if chunk:
+                        yield chunk
+    except ModelError:
+        raise
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            err = json.loads(e.read()).get("error", "")
+            detail = err.get("message", "") if isinstance(err, dict) else str(err)
+        except Exception:
+            pass
+        if e.code in (401, 403):
+            detail = (f"The API refused the key (HTTP {e.code}). Check ${c.get('api_key_env')}."
+                      + (f" {detail}" if detail else ""))
+        raise ModelError(_scrub(detail or f"HTTP {e.code}", c))
+    except urllib.error.URLError:
+        raise ModelError(f"Can't reach the API at {c.get('api_base')}.")
+    except Exception as e:
+        raise ModelError(_scrub(str(e) or e.__class__.__name__, c))
+
 def stream_ollama(q, c, passages=None, history=None):
-    """Yield answer text chunks as Ollama generates them. Raises OllamaError."""
+    """Yield answer text chunks as Ollama generates them. Raises ModelError."""
     pay = {
         "model": c["model"],
-        "messages": [
-            {"role": "system", "content": build_prompt(passages, system_summary(c))},
-            *(history or []),
-            {"role": "user",   "content": q + (
-                "\n\n[Important: end your answer with exactly: Source: <man page name>]"
-                if passages else ""
-            )}
-        ],
+        "messages": chat_messages(q, c, passages, history),
         "options": {"temperature": c.get("temperature", 0.1),
                     "num_predict": c.get("max_tokens", 300),
                     "num_gpu": c.get("num_gpu", 99)},
@@ -836,6 +922,7 @@ class Renderer:
         self.commands = []     # runnable commands found in shell code blocks
         self.color = c.get("color", True)
         self.model = c.get("model", "")
+        self.where = backend_label(c)
         self.mode  = mode
         self.cols  = max(shutil.get_terminal_size((80, 24)).columns, 24)
         self.buf   = ""
@@ -858,8 +945,8 @@ class Renderer:
             mode_label += " · follow-up"
         self._w()
         self._w(f"{C.Y}{C.B}╭{'─'*(cols-2)}╮{C.Z}" if color else f"┌{'─'*(cols-2)}┐")
-        self._w(f"{C.Y}{C.B}╞═ 🐧 TuxAide {C.D}(Ollama · {self.model}{mode_label}){C.Z}{C.Y}{C.B} ═╡{C.Z}"
-                if color else f"╞═ TuxAide (Ollama · {self.model}{mode_label}) ═╡")
+        self._w(f"{C.Y}{C.B}╞═ 🐧 TuxAide {C.D}({self.where} · {self.model}{mode_label}){C.Z}{C.Y}{C.B} ═╡{C.Z}"
+                if color else f"╞═ TuxAide ({self.where} · {self.model}{mode_label}) ═╡")
 
     def feed(self, chunk):
         self.header()
@@ -968,13 +1055,13 @@ def answer_streaming(q, c, passages, mode, spinner, history=None):
     parts, ttft, ok = [], None, True
     t0 = time.time()
     try:
-        for chunk in stream_ollama(q, c, passages, history):
+        for chunk in stream_answer(q, c, passages, history):
             if ttft is None:
                 ttft = time.time() - t0
                 spinner.stop()
             parts.append(chunk)
             r.feed(chunk)
-    except OllamaError as e:
+    except ModelError as e:
         ok = False
         spinner.stop()
         r.feed(("\n\n" if parts else "") + f"[Error] {e}")
@@ -1270,8 +1357,7 @@ def find_model(name, models):
     return None
 
 def ollama_is_local(c):
-    host = urllib.parse.urlparse(c["ollama_url"]).hostname or ""
-    return host in ("localhost", "127.0.0.1", "::1")
+    return is_loopback(urllib.parse.urlparse(c["ollama_url"]).hostname or "")
 
 def ollama_start_hint():
     """The command that starts Ollama on this system."""
@@ -1299,6 +1385,70 @@ def ollama_down_hint(c):
 def print_ollama_down(c):
     print(f"\n{C.O}⚠ Ollama not available.{C.Z}")
     print(f"{C.D}  {ollama_down_hint(c)}{C.Z}\n")
+
+# ── Which backend answers, and is it on this machine? ─────────────────
+LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
+
+def backend_url(c):
+    return c.get("api_base", "") if c.get("backend") == "openai" else c.get("ollama_url", DEFAULTS["ollama_url"])
+
+def is_loopback(host):
+    return host in LOCAL_HOSTS or host.startswith("127.")
+
+def remote_host(c):
+    """The first host outside this machine that will see the question, or None.
+    That's the backend, plus Ollama for RAG embeddings when the backend is an API."""
+    urls = [backend_url(c)]
+    if c.get("backend") == "openai" and c.get("mode", "llm") in ("smart", "deep"):
+        urls.append(c.get("ollama_url", DEFAULTS["ollama_url"]))
+    for url in urls:
+        host = urllib.parse.urlparse(url).hostname or ""
+        if host and not is_loopback(host):
+            return host
+    return None
+
+def is_remote(c):
+    """True when questions leave this machine (another computer, or a cloud API)."""
+    return remote_host(c) is not None
+
+def backend_label(c):
+    """"Ollama", "API", or "☁ remote · host" — shown on every answer."""
+    name = "API" if c.get("backend") == "openai" else "Ollama"
+    return f"☁ remote · {remote_host(c)}" if is_remote(c) else name
+
+def thinking(c):
+    """The spinner, started before any request: says so when the question leaves the machine."""
+    return Spinner(f"☁ Asking {remote_host(c)}" if is_remote(c) else "Thinking").start()
+
+def api_models(c):
+    """Model ids the OpenAI-compatible API offers, or None when it doesn't say."""
+    try:
+        with urllib.request.urlopen(_api_request(c, "/models"), timeout=5) as r:
+            return [m.get("id", "") for m in json.loads(r.read()).get("data", [])]
+    except Exception:
+        return None
+
+def backend_ok(c):
+    """Does the backend answer at all? (An HTTP error still means it's there.)"""
+    if c.get("backend") != "openai":
+        return ollama_ok(c)
+    if not c.get("api_base"):
+        return False
+    try:
+        with urllib.request.urlopen(_api_request(c, "/models"), timeout=5):
+            return True
+    except urllib.error.HTTPError:
+        return True
+    except Exception:
+        return False
+
+def print_backend_down(c):
+    if c.get("backend") != "openai":
+        return print_ollama_down(c)
+    print(f"\n{C.O}⚠ The model API isn't answering.{C.Z}")
+    hint = (f"Check that it's running at {c['api_base']}" if c.get("api_base")
+            else "Set its address with: tuxaide config set api_base <url>")
+    print(f"{C.D}  {hint}{C.Z}\n")
 
 def human_size(n):
     if n >= 1024 ** 3:
@@ -1350,8 +1500,16 @@ def set_mode(new_mode):
 def _config_text(v):
     return v if isinstance(v, str) else json.dumps(v)
 
+SECRET_KEYS = ("api_key", "key", "token", "openai_api_key", "password")
+
 def set_setting(key, raw):
     """Validate and save one setting. Returns an exit code; prints why on error."""
+    if key.lower() in SECRET_KEYS:
+        env = cfg().get("api_key_env", DEFAULTS["api_key_env"])
+        print("TuxAide never stores API keys in its settings. Put the key in an environment\n"
+              f"variable instead (e.g. in your shell rc): export {env}=…\n"
+              "To use a different variable name: tuxaide config set api_key_env <NAME>")
+        return 2
     if key not in SETTABLE:
         if key in DEFAULTS:
             print(f"{key} can't be changed with tuxaide config; edit {CFG_FILE}")
@@ -1367,6 +1525,14 @@ def set_setting(key, raw):
         return set_mode(value)
     save_cfg({key: value})
     return 0
+
+def backend_notes(key):
+    """After `config set` of a backend setting: what to do next, and whether answers now leave the machine."""
+    c = cfg()
+    if key == "backend" and c.get("backend") == "openai" and not c.get("api_base"):
+        print(f"{C.D}   Now set the API address, e.g.: tuxaide config set api_base http://localhost:1234/v1{C.Z}")
+    if key in ("backend", "api_base", "ollama_url", "mode") and is_remote(c):
+        print(f"{C.R}☁ Questions will be sent to {remote_host(c)}, outside this machine.{C.Z}")
 
 def config_cmd(args):
     if not args or args == ["list"]:
@@ -1391,6 +1557,7 @@ def config_cmd(args):
         rc = set_setting(key, raw)
         if rc == 0:
             print(f"🐧 {key} = {_config_text(cfg()[key])}")
+            backend_notes(key)
         return rc
     if args[0] == "reset" and len(args) == 2 and args[1] in SETTABLE:
         key = args[1]
@@ -1420,8 +1587,36 @@ def pull_model(name, c):
     except (OSError, KeyboardInterrupt):
         return False
 
+def api_model_cmd(args, c):
+    """`tuxaide model` with an OpenAI-compatible backend: models are the API's, never pulled."""
+    offered = api_models(c)
+    if not args:
+        if offered is None:
+            print(f"🐧 Model: {c['model']} ({backend_label(c)})")
+            print(f"{C.D}   The API at {c.get('api_base') or '(not set)'} doesn't list its models.{C.Z}")
+            return 0
+        print(f"🐧 Models offered by {c['api_base']}:")
+        for name in sorted(offered):
+            print(f"  {f'{C.G}*{C.Z}' if name == c['model'] else ' '} {name}")
+        print(f"{C.D}   Switch with: tuxaide model <name>{C.Z}")
+        return 0
+    name = args[0]
+    try:
+        _parse_model(name)
+    except ValueError as e:
+        print(f"Invalid model name: {e}")
+        return 2
+    if offered is not None and name not in offered:
+        print(f"🐧 The API at {c['api_base']} doesn't offer {name}. See the list with: tuxaide model")
+        return 1
+    save_cfg({"model": name})
+    print(f"🐧 Model changed to: {name}")
+    return 0
+
 def model_cmd(args):
     c = cfg()
+    if c.get("backend") == "openai":
+        return api_model_cmd(args, c)
     models = ollama_models(c)
     if not args:
         if models is None:
@@ -1453,6 +1648,18 @@ def model_cmd(args):
             return 1
     save_cfg({"model": name})
     print(f"🐧 Model changed to: {name}")
+    return 0
+
+# ── status ────────────────────────────────────────────────────────────
+def status_cmd():
+    c = cfg()
+    if not c.get("enabled", True):
+        print("🐧 Status: INACTIVE")
+        return 0
+    print(f"🐧 Status: ACTIVE | Mode: {c.get('mode', 'llm').upper()} | Model: {c['model']} ({backend_label(c)})"
+          f" | Session capture: {str(bool(c.get('session_capture'))).lower()} | Session file: {SESSION_FILE}")
+    if is_remote(c):
+        print(f"{C.R}☁ Questions are sent to {remote_host(c)} — they are not answered on this machine.{C.Z}")
     return 0
 
 # ── cache ─────────────────────────────────────────────────────────────
@@ -1487,13 +1694,38 @@ def available_memory():
             page = int(re.search(r"page size of (\d+)", out).group(1))
             pages = {k.strip(): int(v.strip(" .")) for k, v in re.findall(r"^(Pages [^:]+):\s+(\d+)", out, re.M)}
             return page * sum(pages.get(k, 0) for k in ("Pages free", "Pages inactive", "Pages speculative"))
+        free = None
         with open("/proc/meminfo") as f:
             for line in f:
                 if line.startswith("MemAvailable:"):
-                    return int(line.split()[1]) * 1024
+                    free = int(line.split()[1]) * 1024
+        # In a container, the cgroup limit is what's really left.
+        try:
+            with open("/sys/fs/cgroup/memory.max") as f:
+                limit = f.read().strip()
+            with open("/sys/fs/cgroup/memory.current") as f:
+                used = int(f.read())
+            with open("/sys/fs/cgroup/memory.stat") as f:      # file cache can be reclaimed
+                stat = dict(line.split() for line in f if line.count(" ") == 1)
+            used -= int(stat.get("inactive_file", 0))
+            if limit.isdigit():
+                free = min(free if free is not None else int(limit), int(limit) - used)
+        except (OSError, ValueError):
+            pass
+        return free
     except Exception:
         pass
     return None
+
+# Smaller models to suggest, largest first (download sizes from registry.ollama.ai).
+LIGHT_MODELS = [("qwen2.5:3b", 1_929_911_945), ("qwen2.5:1.5b", 986_061_405), ("qwen2.5:0.5b", 397_820_829)]
+
+def smaller_model_hint(size):
+    """What to switch to when a model of `size` bytes doesn't fit."""
+    for name, s in LIGHT_MODELS:
+        if s < size * 0.8:
+            return f"switch to a smaller model: tuxaide model {name}"
+    return "use Ollama on another computer or an API (see the README: Remote backends)"
 
 def shell_rc_files():
     return [os.path.expanduser(f"~/{n}") for n in (".zshrc", ".bashrc")]
@@ -1514,6 +1746,41 @@ class Doctor:
     def fail(self, msg, fix=None):
         self.failed += 1
         self._line("✗", C.O, msg, fix)
+
+def c_env(raw):
+    return raw.get("api_key_env") or DEFAULTS["api_key_env"]
+
+def doctor_api(d, c):
+    """doctor's checks for an OpenAI-compatible backend."""
+    base, env = c.get("api_base"), c.get("api_key_env") or DEFAULTS["api_key_env"]
+    if not base:
+        d.fail("Backend is openai, but no API address is set",
+               "tuxaide config set api_base <url>   (e.g. http://localhost:1234/v1)")
+        return
+    if api_key(c):
+        d.ok(f"API key read from ${env}")
+    elif is_remote(c):
+        d.fail(f"No API key: ${env} is empty in this shell",
+               f"export {env}=…   (in your shell rc; TuxAide never stores it)")
+    else:
+        d.info(f"No API key in ${env} (fine for local servers)")
+    try:
+        with urllib.request.urlopen(_api_request(c, "/models"), timeout=5) as r:
+            offered = [x.get("id", "") for x in json.loads(r.read()).get("data", [])]
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            d.fail(f"The API at {base} refused the key (HTTP {e.code})", f"check ${env}")
+        else:
+            d.ok(f"API answering at {base} (it doesn't list models: HTTP {e.code})")
+        return
+    except Exception:
+        d.fail(f"The API isn't answering at {base}", "check that the server is running and the address is right")
+        return
+    d.ok(f"API answering at {base}")
+    if c["model"] in offered:
+        d.ok(f"Model {c['model']} offered")
+    else:
+        d.fail(f"The API doesn't offer model {c['model']}", "pick one of its models: tuxaide model")
 
 def doctor():
     """Check the whole setup; every problem comes with the command that fixes it.
@@ -1536,8 +1803,12 @@ def doctor():
             with open(CFG_FILE) as f:
                 raw = json.load(f)
             bad = []
+            for key in raw:
+                if key.lower() in SECRET_KEYS:
+                    d.fail(f"{short(CFG_FILE)} contains \"{key}\": TuxAide never reads keys from files",
+                           f"remove it and use an environment variable: export {c_env(raw)}=…")
             for key, value in raw.items():
-                if key in SETTABLE:
+                if key in SETTABLE and value != DEFAULTS.get(key):
                     try:
                         SETTABLE[key](value if isinstance(value, str) else json.dumps(value))
                     except ValueError as e:
@@ -1555,33 +1826,44 @@ def doctor():
     if not c.get("enabled", True):
         d.warn("TuxAide is turned off", "tuxaide on")
 
-    # Ollama and the model
-    models = ollama_models(c)
+    # The model backend
     model = c["model"]
     m = None
-    if models is None:
-        if ollama_is_local(c) and not shutil.which("ollama"):
-            d.fail("Ollama isn't installed", ollama_install_hint())
-        elif ollama_is_local(c):
-            d.fail(f"Ollama isn't answering at {c['ollama_url']}", ollama_start_hint())
-        else:
-            d.fail(f"Ollama isn't answering at {c['ollama_url']}",
-                   "start it on that machine, or use the local one: "
-                   f"tuxaide config set ollama_url {DEFAULTS['ollama_url']}")
+    models = None
+    if c.get("backend") == "openai":
+        doctor_api(d, c)
     else:
-        version = (_ollama_get(c, "/api/version") or {}).get("version")
-        d.ok(f"Ollama {version + ' ' if version else ''}answering at {c['ollama_url']}")
-        m = find_model(model, models)
-        if m:
-            d.ok(f"Model {model} downloaded ({human_size(m.get('size', 0))})")
+        models = ollama_models(c)
+        if models is None:
+            if ollama_is_local(c) and not shutil.which("ollama"):
+                d.fail("Ollama isn't installed", ollama_install_hint())
+            elif ollama_is_local(c):
+                d.fail(f"Ollama isn't answering at {c['ollama_url']}", ollama_start_hint())
+            else:
+                d.fail(f"Ollama isn't answering at {c['ollama_url']}",
+                       "start it on that machine, or use the local one: "
+                       f"tuxaide config set ollama_url {DEFAULTS['ollama_url']}")
         else:
-            d.fail(f"Model {model} isn't downloaded",
-                   f"ollama pull {model}   (or pick an installed one: tuxaide model)")
+            version = (_ollama_get(c, "/api/version") or {}).get("version")
+            d.ok(f"Ollama {version + ' ' if version else ''}answering at {c['ollama_url']}")
+            m = find_model(model, models)
+            if m:
+                d.ok(f"Model {model} downloaded ({human_size(m.get('size', 0))})")
+            else:
+                d.fail(f"Model {model} isn't downloaded",
+                       f"ollama pull {model}   (or pick an installed one: tuxaide model)")
+    if is_remote(c):
+        d.info(f"☁ Questions are sent to {remote_host(c)}: they leave this machine")
 
     # Smart RAG
     mode = c.get("mode", "llm")
     if mode in ("smart", "deep"):
         embed_model = c.get("embed_model", "nomic-embed-text")
+        if models is None and c.get("backend") == "openai":
+            models = ollama_models(c)       # embeddings still come from Ollama
+            if models is None:
+                d.fail(f"Mode {mode} needs Ollama for embeddings, and it isn't answering at {c['ollama_url']}",
+                       "tuxaide mode llm")
         if models is not None:
             if find_model(embed_model, models):
                 d.ok(f"Embedding model {embed_model} downloaded")
@@ -1643,7 +1925,7 @@ def doctor():
                f"echo 'export PATH=\"$HOME/.local/bin:$PATH\"' >> ~/.{shell}rc")
 
     # Memory for the model
-    if m and m.get("size"):
+    if m and m.get("size") and not is_remote(c):
         loaded = any(p.get("name") == m.get("name") for p in (_ollama_get(c, "/api/ps") or {}).get("models", []))
         free = available_memory()
         need = m["size"]
@@ -1651,7 +1933,7 @@ def doctor():
             d.ok(f"Model {model} is loaded in memory")
         elif free is not None and free < need * 1.2:
             d.warn(f"Only {human_size(free)} of memory free; {model} needs about {human_size(need)}",
-                   "close some programs, or switch to a smaller model: tuxaide model qwen2.5:3b")
+                   f"close some programs, or {smaller_model_hint(need)}")
         elif free is not None:
             d.ok(f"Memory: {human_size(free)} free, {model} needs about {human_size(need)}")
 
@@ -1770,7 +2052,8 @@ def main():
         return
     commands = {"doctor": lambda: doctor(), "config": lambda: config_cmd(args),
                 "model": lambda: model_cmd(args), "modelo": lambda: model_cmd(args),
-                "cache": lambda: cache_cmd(args), "update": lambda: update_cmd(args)}
+                "cache": lambda: cache_cmd(args), "update": lambda: update_cmd(args),
+                "status": lambda: status_cmd()}
     if mode_arg in commands:
         # Plain text when piped (e.g. doctor's output pasted into a bug report).
         if not sys.stdout.isatty() or not cfg().get("color", True):
@@ -1807,8 +2090,8 @@ def main():
     # --explain-last: force contextual explanation from last shell run
     if mode_arg == "--explain-last":
         c = cfg()
-        if not ollama_ok(c):
-            print_ollama_down(c)
+        if not backend_ok(c):
+            print_backend_down(c)
             return
         last_run = load_last_shell_context()
         if not last_run:
@@ -1817,7 +2100,7 @@ def main():
             return
         user_q = " ".join(sys.argv[2:]).strip() or default_context_query()
         effective_q = build_contextual_question(user_q, last_run)
-        spinner = Spinner().start()
+        spinner = thinking(c)
         _, _, _, commands = answer_streaming(effective_q, c, None, "llm", spinner)
         action_menu(commands, c)
         return
@@ -1825,8 +2108,8 @@ def main():
     # --why CMD RC [QUESTION...]: explain the last command (the `?` alias)
     if mode_arg == "--why":
         c = cfg()
-        if not ollama_ok(c):
-            print_ollama_down(c)
+        if not backend_ok(c):
+            print_backend_down(c)
             return
         cmd = sys.argv[2] if len(sys.argv) > 2 else ""
         rc  = sys.argv[3] if len(sys.argv) > 3 else ""
@@ -1908,8 +2191,8 @@ def main():
     if mode_arg != "--ask" and not is_q(q): sys.exit(0)
 
     c = cfg()
-    if not ollama_ok(c):
-        print_ollama_down(c)
+    if not backend_ok(c):
+        print_backend_down(c)
         sys.exit(0)
 
     # "why did this fail?" right after a failed command → same as `?`
@@ -1958,7 +2241,7 @@ def main():
     detected_cmd = None
     act_mode     = "llm"
 
-    spinner = Spinner().start()
+    spinner = thinking(c)
 
     if context_query:
         passages = []

@@ -148,7 +148,7 @@ def healthy(home, ollama):
 
 
 def test_doctor_all_good(run_agent, healthy):
-    r = run_agent("doctor", env=healthy)
+    r = run_agent("doctor", env=healthy, config={"api_base": ""})    # as the installer writes it
     assert r.returncode == 0, r.stdout
     assert "All good." in r.stdout
     assert "Ollama 0.0.0-fake answering" in r.stdout and "Model fake downloaded" in r.stdout
@@ -320,3 +320,10 @@ def test_update_without_network(installed):
 def test_version_tuple(agent):
     assert agent.version_tuple("v2.10.0") > agent.version_tuple("2.9.9")
     assert agent.version_tuple("2.3") == agent.version_tuple("2.3")
+
+
+def test_smaller_model_hint_is_really_smaller(agent):
+    assert agent.smaller_model_hint(4_683_087_074).endswith("qwen2.5:3b")         # 7b → 3b
+    assert agent.smaller_model_hint(1_929_911_945).endswith("qwen2.5:1.5b")       # 3b → 1.5b
+    assert agent.smaller_model_hint(986_061_405).endswith("qwen2.5:0.5b")         # 1.5b → 0.5b
+    assert "Remote backends" in agent.smaller_model_hint(397_820_829)            # nothing smaller

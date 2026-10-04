@@ -3,7 +3,6 @@
 _LG="${HOME}/.local/bin/tuxaide"
 _TUX_CFG="${HOME}/.config/tuxaide/config.json"
 _TUX_SESSION_WRITER="${HOME}/.config/tuxaide/session_writer.py"
-_TUX_SESSION_FILE="${HOME}/.config/tuxaide/session.json"
 _TUX_PENDING_DIR="${HOME}/.config/tuxaide/pending"
 _TUX_HOOK="${HOME}/.config/tuxaide/hook.sh"
 
@@ -27,13 +26,14 @@ print("true" if c.get("enabled", True) else "false",
       c.get("keep_alive", "10m"),
       c.get("model", "qwen2.5-coder:7b"),
       c.get("ollama_url", "http://localhost:11434"),
-      "true" if c.get("failure_hint", True) else "false")
+      "true" if c.get("failure_hint", True) else "false",
+      c.get("backend", "ollama"))
 PYEOF
 }
 # Also run after `tuxaide config` / `model`, so a change applies in this shell too.
 _tux_reload_cfg() {
-    read -r _LG_ON _TUX_PREWARM _TUX_KEEP_ALIVE _TUX_MODEL _TUX_OLLAMA_URL _TUX_FAILURE_HINT <<CFGEOF
-$(_tux_load_cfg || echo "true once 10m qwen2.5-coder:7b http://localhost:11434 true")
+    read -r _LG_ON _TUX_PREWARM _TUX_KEEP_ALIVE _TUX_MODEL _TUX_OLLAMA_URL _TUX_FAILURE_HINT _TUX_BACKEND <<CFGEOF
+$(_tux_load_cfg || echo "true once 10m qwen2.5-coder:7b http://localhost:11434 true ollama")
 CFGEOF
 }
 _tux_reload_cfg
@@ -120,12 +120,6 @@ tuxaide() {
             "$_LG" --set enabled false
             echo "🐧 TuxAide DISABLED (also in new terminals — 'tuxaide on' to re-enable)"
             ;;
-        status)
-            local mode capture
-            mode=$(python3 -c "import json,os; c=json.load(open(os.path.expanduser('~/.config/tuxaide/config.json'))); print(c.get('mode','llm').upper())" 2>/dev/null || echo "LLM")
-            capture=$(_tux_session_capture_enabled)
-            [[ "$_LG_ON" == "true" ]] && echo "🐧 Status: ACTIVE | Mode: $mode | Session capture: ${capture:-false} | Session file: ${_TUX_SESSION_FILE}" || echo "🐧 Status: INACTIVE"
-            ;;
         run)
             shift
             _tux_run "$@"
@@ -155,7 +149,7 @@ tuxaide() {
             fi
             return "$rc"
             ;;
-        mode|index|reindex|--timing|new|history|system|cache|help|--help|-h|version|--version|-V) "$_LG" "$@" ;;
+        status|mode|index|reindex|--timing|new|history|system|cache|help|--help|-h|version|--version|-V) "$_LG" "$@" ;;
         *) "$_LG" --ask "$*" ;;
     esac
 }
@@ -326,7 +320,12 @@ fi
 #   prewarm=always  every new shell
 # An empty prompt only loads the model; keep_alive sets how long it stays loaded.
 _tux_prewarm() {
-    [[ "$_LG_ON" == "true" ]] || return 0
+    [[ "$_LG_ON" == "true" && "$_TUX_BACKEND" == "ollama" ]] || return 0
+    # Only a local Ollama: nothing leaves the machine without the ☁ indicator.
+    case "$_TUX_OLLAMA_URL" in
+        http://localhost[:/]*|http://localhost|http://127.*|http://\[::1\]*) ;;
+        *) return 0 ;;
+    esac
     case "$_TUX_PREWARM" in
         off) return 0 ;;
         always) ;;

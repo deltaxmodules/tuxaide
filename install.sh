@@ -52,6 +52,13 @@ ask()   { echo -e "  ${MG}?${R}  $*"; }
 STEP=0
 TOTAL_STEPS=9
 INSTALL_RAG=false
+# Where answers come from: "local" (Ollama here), "ollama-remote" (Ollama on
+# another computer) or "openai" (an OpenAI-compatible API). Remote is only
+# ever used when the user picks it.
+BACKEND="local"
+OLLAMA_URL="http://localhost:11434"
+API_BASE=""
+API_KEY_ENV="OPENAI_API_KEY"
 VENV="${HOME}/.local/share/tuxaide/venv"
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -87,12 +94,17 @@ diagnose_system() {
 
     # RAM
     if [[ "$OS" == "macos" ]]; then
-        RAM_BYTES=$(sysctl -n hw.memsize 2>/dev/null || echo 0)
-        RAM_GB=$((RAM_BYTES / 1024 / 1024 / 1024))
+        RAM_MB=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1024 / 1024 ))
     else
-        RAM_KB=$(awk '/MemTotal/{print $2}' /proc/meminfo)
-        RAM_GB=$((RAM_KB / 1024 / 1024))
+        RAM_MB=$(( $(awk '/MemTotal/{print $2}' /proc/meminfo) / 1024 ))
+        # In a container or a VM slice, the cgroup limit is what we really get.
+        local limit
+        limit=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo max)
+        if [[ "$limit" =~ ^[0-9]+$ ]] && (( limit / 1024 / 1024 < RAM_MB )); then
+            RAM_MB=$(( limit / 1024 / 1024 ))
+        fi
     fi
+    RAM_GB=$(( (RAM_MB + 512) / 1024 ))
     ok "Available RAM: ${RAM_GB} GB"
 
     # Disk space
@@ -139,18 +151,20 @@ diagnose_system() {
     ok "Man pages available: ~${MAN_COUNT} in man1"
 
     # ── Model selection ───────────────────────────────────────────────
-    if [[ $RAM_GB -ge 8 ]]; then
-        MODEL="qwen2.5-coder:7b"
-        MODEL_SIZE="4.7 GB"
-        RAG_CAPABLE=true
-    elif [[ $RAM_GB -ge 5 ]]; then
-        MODEL="qwen2.5:3b"
-        MODEL_SIZE="1.9 GB"
-        RAG_CAPABLE=true
+    # Thresholds sit a little under 8/5/3 GB: the kernel reserves some of
+    # the RAM, so an "8 GB" machine reports about 7.6 GB.
+    # Download sizes from registry.ollama.ai (checked 2026-10).
+    LOW_RAM=false
+    if [[ $RAM_MB -ge 7000 ]]; then
+        MODEL="qwen2.5-coder:7b"; MODEL_SIZE="4.7 GB"; DISK_NEED_GB=6; RAG_CAPABLE=true
+    elif [[ $RAM_MB -ge 4500 ]]; then
+        MODEL="qwen2.5:3b";       MODEL_SIZE="1.9 GB"; DISK_NEED_GB=3; RAG_CAPABLE=true
+    elif [[ $RAM_MB -ge 2800 ]]; then
+        MODEL="qwen2.5:1.5b";     MODEL_SIZE="986 MB"; DISK_NEED_GB=2; RAG_CAPABLE=false
     else
-        MODEL="qwen2.5:3b"
-        MODEL_SIZE="1.9 GB"
-        RAG_CAPABLE=false
+        # Too little for a useful local model: offer a remote backend below.
+        MODEL="qwen2.5:0.5b";     MODEL_SIZE="398 MB"; DISK_NEED_GB=1; RAG_CAPABLE=false
+        LOW_RAM=true
     fi
 
     # ── Print diagnosis summary ────────────────────────────────────────
@@ -165,7 +179,9 @@ diagnose_system() {
     echo -e "  ${CY}${BOLD}├─────────────────────────────────────────────────────┤${R}"
 
     # LLM mode assessment
-    if [[ $RAM_GB -ge 5 && $DISK_FREE_GB -ge 6 ]]; then
+    if [[ $LOW_RAM == "true" ]]; then
+        box_status "$YL" "⚠" "LLM mode" "TINY MODEL OR REMOTE"
+    elif [[ $DISK_FREE_GB -ge $DISK_NEED_GB ]]; then
         box_status "$GR" "✓" "LLM mode" "READY"
     else
         box_status "$RD" "✗" "LLM mode" "INSUFFICIENT RESOURCES"
@@ -188,16 +204,18 @@ diagnose_system() {
 
     # Warnings
     echo ""
-    if [[ $RAM_GB -lt 5 ]]; then
-        warn "RAM is below 5 GB. Installation will proceed but performance may be poor."
+    if [[ $RAM_MB -lt 4500 && $LOW_RAM == "false" ]]; then
+        warn "Less than 5 GB of RAM: using the smaller $MODEL — answers are simpler, but it works."
     fi
-    if [[ $DISK_FREE_GB -lt 6 ]]; then
-        warn "Less than 6 GB free disk space. The AI model requires ~5 GB."
+    if [[ $DISK_FREE_GB -lt $DISK_NEED_GB ]]; then
+        warn "Less than ${DISK_NEED_GB} GB free disk space. The AI model needs $MODEL_SIZE."
         warn "Free up space before continuing."
     fi
     if [[ $HAS_GPU == "false" ]]; then
         warn "No GPU detected. Responses will be slower (~4-10s per query on CPU)."
     fi
+
+    [[ $LOW_RAM == "true" ]] && choose_backend
 
     # Confirmation
     echo ""
@@ -212,11 +230,77 @@ diagnose_system() {
     fi
 }
 
+# Below ~3 GB of RAM a local model is barely usable. Offer a tiny local
+# model or a remote backend — remote only by explicit choice.
+choose_backend() {
+    echo ""
+    echo -e "  ${BOLD}This machine has ${RAM_GB} GB of RAM — too little for a good local model.${R}"
+    echo -e "  ${BOLD}1)${R} Tiny local model ${CY}qwen2.5:0.5b${R} (398 MB download) — 100% local, basic answers"
+    echo -e "  ${BOLD}2)${R} Ollama on another computer in your network"
+    echo -e "  ${BOLD}3)${R} An OpenAI-compatible API (LM Studio, llama.cpp server, vLLM or a cloud service)"
+    ask "Choose [1]: "
+    local choice answer
+    read -r choice </dev/tty
+    case "${choice:-1}" in
+        2)
+            ask "Address of that Ollama (e.g. http://192.168.1.10:11434): "
+            read -r answer </dev/tty
+            [[ "$answer" =~ ^https?://[^[:space:]]+$ ]] || err "Not a valid address: $answer"
+            OLLAMA_URL="${answer%/}"
+            if ! curl -fsS -m 5 "${OLLAMA_URL}/api/tags" -o /tmp/tuxaide_tags.json 2>/dev/null; then
+                err "No Ollama answering at ${OLLAMA_URL}. Start it there with OLLAMA_HOST=0.0.0.0 ollama serve"
+            fi
+            local models
+            models=$(python3 -c 'import json; print(" ".join(m["name"] for m in json.load(open("/tmp/tuxaide_tags.json")).get("models", [])))' 2>/dev/null || true)
+            info "Models there: ${models:-none}"
+            ask "Model to use [${models%% *}]: "
+            read -r answer </dev/tty
+            MODEL="${answer:-${models%% *}}"
+            [[ -n "$MODEL" ]] || err "No model chosen. Download one on that computer: ollama pull qwen2.5-coder:7b"
+            BACKEND="ollama-remote"
+            ;;
+        3)
+            ask "API address [https://api.openai.com/v1]: "
+            read -r answer </dev/tty
+            API_BASE="${answer:-https://api.openai.com/v1}"
+            API_BASE="${API_BASE%/}"
+            [[ "$API_BASE" =~ ^https?://[^[:space:]]+$ ]] || err "Not a valid address: $API_BASE"
+            ask "Model name (as the API calls it): "
+            read -r MODEL </dev/tty
+            [[ "$MODEL" =~ ^[A-Za-z0-9._:/-]+$ ]] || err "Not a valid model name: $MODEL"
+            ask "Environment variable that holds your API key [OPENAI_API_KEY]: "
+            read -r answer </dev/tty
+            API_KEY_ENV="${answer:-OPENAI_API_KEY}"
+            [[ "$API_KEY_ENV" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || err "Not a valid variable name: $API_KEY_ENV"
+            BACKEND="openai"
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+    MODEL_SIZE="remote"
+    local host="${OLLAMA_URL}"
+    [[ "$BACKEND" == "openai" ]] && host="$API_BASE"
+    case "$host" in
+        http://localhost*|http://127.*) ;;
+        *) warn "☁ Your questions will be sent to ${host} — they leave this machine." ;;
+    esac
+    # Nothing to download or run locally; Smart RAG needs a local Ollama.
+    TOTAL_STEPS=$((TOTAL_STEPS - 3))
+    RAG_CAPABLE=false
+}
+
 # ═══════════════════════════════════════════════════════════════════════
 # STEP 2 — Ask about RAG
 # ═══════════════════════════════════════════════════════════════════════
 ask_rag() {
     step "RAG mode — man page knowledge base"
+
+    if [[ "$BACKEND" != "local" ]]; then
+        info "Smart RAG needs a local Ollama for its embeddings — skipped with a remote backend."
+        INSTALL_RAG=false
+        return
+    fi
 
     echo ""
     echo -e "  ${BOLD}What is Smart RAG mode?${R}"
@@ -234,7 +318,7 @@ ask_rag() {
     echo -e "  ${DIM}If skipped now, you can enable later with: tuxaide mode smart${R}"
     echo ""
 
-    if [[ "$RAG_AVAILABLE" == "false" ]]; then
+    if [[ "$RAG_AVAILABLE" == "false" || "$BACKEND" != "local" ]]; then
         warn "RAG mode is not recommended for this system (insufficient RAM or disk)."
         warn "Installing in LLM-only mode."
         INSTALL_RAG=false
@@ -344,6 +428,7 @@ setup_rag_venv() {
 # STEP 4 — Ollama
 # ═══════════════════════════════════════════════════════════════════════
 install_ollama() {
+    [[ "$BACKEND" == "local" ]] || return 0
     step "Installing Ollama"
 
     if command -v ollama &>/dev/null; then
@@ -382,6 +467,7 @@ install_ollama() {
 }
 
 start_ollama() {
+    [[ "$BACKEND" == "local" ]] || return 0
     step "Starting Ollama service"
 
     if curl -s http://localhost:11434/api/tags &>/dev/null; then
@@ -454,6 +540,7 @@ has_model() {
 }
 
 download_models() {
+    [[ "$BACKEND" == "local" ]] || return 0
     step "Downloading AI models"
 
     # Main LLM
@@ -541,11 +628,15 @@ install_agent() {
     # Merge with any existing config: settings the user already has win,
     # new keys get these defaults. Values are passed as arguments, not interpolated.
     local cfg_msg
-    cfg_msg=$(python3 - "${CFG}/config.json" "$MODEL" "$mode_val" "$prewarm_val" <<'PYEOF'
+    cfg_msg=$(python3 - "${CFG}/config.json" "$MODEL" "$mode_val" "$prewarm_val" \
+        "$BACKEND" "$OLLAMA_URL" "$API_BASE" "$API_KEY_ENV" <<'PYEOF'
 import json, os, sys
-path, model, mode, prewarm = sys.argv[1:5]
+path, model, mode, prewarm, backend, ollama_url, api_base, api_key_env = sys.argv[1:9]
 defaults = {
+    "backend": "ollama",
     "ollama_url": "http://localhost:11434",
+    "api_base": "",
+    "api_key_env": "OPENAI_API_KEY",
     "model": model,
     "embed_model": "nomic-embed-text",
     "max_tokens": 300,
@@ -573,6 +664,12 @@ try:
 except Exception:
     pass
 merged = {**defaults, **existing}
+# A remote backend picked in this run wins over older settings. No API key is
+# ever written: it's read from the environment variable named api_key_env.
+if backend == "ollama-remote":
+    merged.update(backend="ollama", ollama_url=ollama_url, model=model, prewarm="off")
+elif backend == "openai":
+    merged.update(backend="openai", api_base=api_base, api_key_env=api_key_env, model=model, prewarm="off")
 tmp = path + ".tmp"
 with open(tmp, "w") as f: json.dump(merged, f, indent=4)
 os.replace(tmp, path)
@@ -693,6 +790,14 @@ print_summary() {
     echo ""
     echo -e "  ${BOLD}Active mode:${R}  ${CY}${mode_label}${R}"
     echo -e "  ${BOLD}AI model:${R}     ${CY}${MODEL}${R}"
+    if [[ "$BACKEND" == "openai" ]]; then
+        echo -e "  ${BOLD}API:${R}          ${CY}${API_BASE}${R}"
+        echo ""
+        echo -e "  ${YL}${BOLD}Put your API key in your shell rc (TuxAide never stores it):${R}"
+        echo -e "  ${BOLD}    echo 'export ${API_KEY_ENV}=…' >> ~/.${CURRENT_SHELL}rc${R}"
+    elif [[ "$BACKEND" == "ollama-remote" ]]; then
+        echo -e "  ${BOLD}Ollama:${R}       ${CY}${OLLAMA_URL}${R}"
+    fi
     echo ""
     echo -e "  ${BOLD}How to use:${R}"
     echo -e "  ${CY}how do I list hidden files${R}        ← type directly"
