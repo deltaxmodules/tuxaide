@@ -2,7 +2,7 @@
 
 All notable changes to TuxAide. Versions follow [semantic versioning](https://semver.org/).
 
-## 2.3.0 — unreleased
+## 2.3.0 — 2026-10-04
 
 The biggest release so far: answers stream in, commands go straight to your
 prompt, `?` explains the last error, and TuxAide installs from Homebrew, the
