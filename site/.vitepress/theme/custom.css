@@ -1,0 +1,20 @@
+/* Colours of the terminal theme used in the video (Catppuccin Mocha). */
+:root {
+  --vp-c-brand-1: #1e88e5;
+  --vp-c-brand-2: #1976d2;
+  --vp-c-brand-3: #1565c0;
+}
+.dark {
+  --vp-c-brand-1: #89b4fa;
+  --vp-c-brand-2: #74c7ec;
+  --vp-c-brand-3: #89dceb;
+}
+.VPNavBarTitle .logo {
+  height: 28px;
+}
+.VPHero .image-bg {
+  display: none;
+}
+.VPHero .image-src {
+  max-width: 260px;
+}

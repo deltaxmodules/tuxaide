@@ -2,3 +2,6 @@ SHELL_ERROR_CONTEXT_PLAN.md
 __pycache__/
 .pytest_cache/
 .ruff_cache/
+site/.vitepress/cache/
+site/.vitepress/dist/
+site/node_modules/

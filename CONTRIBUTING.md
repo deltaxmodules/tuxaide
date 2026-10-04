@@ -12,6 +12,8 @@ Thanks for helping. Bug reports, fixes and new ideas are all welcome.
 | `indexer.py` | Builds the man-page knowledge base for Smart RAG |
 | `session_writer.py` | Saves the output of `tuxaide run` for follow-up questions |
 | `pyproject.toml`, `packaging/` | pipx/PyPI package, Homebrew formula and AUR PKGBUILD templates |
+| `site/` | The manual (VitePress), with the demo video and GIF in `site/public/` |
+| `scripts/demo/`, `scripts/demo-video.sh` | How the demo video is recorded |
 | `tests/` | The test suite |
 
 ## Running the tests
@@ -30,11 +32,20 @@ command-not-found hook).
 ## Linting
 
 ```bash
-shellcheck -S warning hook.sh install.sh setup.sh uninstall.sh scripts/render-packaging.sh
+shellcheck -S warning hook.sh install.sh setup.sh uninstall.sh scripts/render-packaging.sh scripts/demo-video.sh scripts/demo/entrypoint.sh
 python3 -m pip install ruff && ruff check .
 ```
 
 CI runs both, plus the tests on Linux (Python 3.9, 3.12, 3.13) and macOS.
+
+## The manual and the demo video
+
+- **Manual** (`site/`, VitePress): `cd site && npm install --no-save vitepress@1.6.4 && npx vitepress dev .`
+  — published to GitHub Pages with each release (`.github/workflows/pages.yml`); CI builds it on every PR.
+- **Demo video and README GIF**: `scripts/demo-video.sh` (needs Docker and Ollama with
+  `qwen2.5-coder:7b`). It records a real terminal with [VHS](https://github.com/charmbracelet/vhs)
+  from `scripts/demo/*.tape`; the plan and the reasons behind it are in `docs/video/PLANO.md`.
+  Answers come from the real model, so watch the result before committing it.
 
 ## Releasing
 
