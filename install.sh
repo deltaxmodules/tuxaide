@@ -558,6 +558,7 @@ defaults = {
     "typo_suggest": True,
     "followup_window": 600,
     "followup_turns": 3,
+    "system_context": True,
 }
 existing = {}
 try:

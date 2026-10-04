@@ -20,4 +20,7 @@ you tested.
   performance log) and, for Smart RAG, `~/.local/share/tuxaide/venv`.
   `session.json` can hold command output, so it is created readable by you only.
 - Questions go to the Ollama server set in `ollama_url` (by default
-  `http://localhost:11434`).
+  `http://localhost:11434`), together with a one-line description of the
+  system (OS, package manager, shell, init, CPU architecture — see
+  `tuxaide system`; turn off with `system_context`). No user names, host
+  names or paths.
