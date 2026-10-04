@@ -169,6 +169,6 @@ def main():
         total += n
     print()
     print(f"✓ Indexing complete — {total} total chunks stored")
-    print(f"  Run 'tuxaide mode smart' to activate Smart RAG mode")
+    print("  Run 'tuxaide mode smart' to activate Smart RAG mode")
 
 if __name__ == "__main__": main()

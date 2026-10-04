@@ -1,1 +1,4 @@
 SHELL_ERROR_CONTEXT_PLAN.md
+__pycache__/
+.pytest_cache/
+.ruff_cache/

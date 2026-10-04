@@ -2,7 +2,6 @@
 """Write last shell run context for TuxAide session explanations."""
 import json
 import os
-import re
 import sys
 import tempfile
 import time

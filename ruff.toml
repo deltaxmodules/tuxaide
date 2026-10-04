@@ -1,0 +1,5 @@
+# Lint for real mistakes (pyflakes + syntax errors), not style: the code
+# deliberately uses compact one-line statements in places.
+target-version = "py39"
+[lint]
+select = ["F", "E9"]
