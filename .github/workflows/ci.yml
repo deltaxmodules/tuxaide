@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: shellcheck
-        run: shellcheck -S warning hook.sh install.sh setup.sh uninstall.sh
+        run: shellcheck -S warning hook.sh install.sh setup.sh uninstall.sh scripts/render-packaging.sh
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -39,3 +39,23 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq zsh
       - run: pip install pytest
       - run: python -m pytest -v
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build the wheel and install it with pipx
+        run: |
+          pipx run build --wheel --outdir dist
+          pipx install dist/*.whl
+          tuxaide --version
+          HOME="$(mktemp -d)" tuxaide setup --yes --no-rag --shell bash --no-doctor
+      - name: Render the Homebrew formula and PKGBUILD
+        run: |
+          git archive --prefix=tuxaide-ci/ -o /tmp/t.tar.gz HEAD
+          scripts/render-packaging.sh 0.0.0 file:///tmp/t.tar.gz /tmp/out
+          ruby -c /tmp/out/tuxaide.rb
+          bash -n /tmp/out/PKGBUILD

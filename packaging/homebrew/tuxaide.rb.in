@@ -1,0 +1,38 @@
+# Homebrew formula template. scripts/render-packaging.sh fills in the version
+# and checksum; the result goes to the deltaxmodules/homebrew-tap repository as
+# Formula/tuxaide.rb, so that `brew install deltaxmodules/tap/tuxaide` works.
+class Tuxaide < Formula
+  include Language::Python::Shebang
+
+  desc "Ask your terminal in plain English: local AI assistant for bash and zsh"
+  homepage "https://github.com/deltaxmodules/tuxaide"
+  url "@URL@"
+  sha256 "@SHA256@"
+  license "MIT"
+
+  depends_on "ollama"
+  depends_on "python@3.13"
+
+  def install
+    libexec.install "agent.py", "indexer.py"
+    rewrite_shebang detected_python_shebang, libexec/"agent.py", libexec/"indexer.py"
+    bin.install_symlink libexec/"agent.py" => "tuxaide"
+    bin.install_symlink libexec/"indexer.py" => "tuxaide-index"
+    pkgshare.install "hook.sh", "session_writer.py"
+  end
+
+  def caveats
+    <<~EOS
+      Set up the model and your shell (once):
+        tuxaide setup
+      Ollama must be running: brew services start ollama
+    EOS
+  end
+
+  test do
+    assert_match version.to_s, shell_output("#{bin}/tuxaide --version")
+    ENV["HOME"] = testpath
+    system bin/"tuxaide", "config", "set", "typo_suggest", "false"
+    assert_match "false", shell_output("#{bin}/tuxaide config get typo_suggest")
+  end
+end

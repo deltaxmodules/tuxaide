@@ -1,0 +1,52 @@
+# For pipx:  pipx install tuxaide        (Smart RAG: pipx install 'tuxaide[rag]')
+# then:      tuxaide setup
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tuxaide"
+dynamic = ["version"]
+description = "Ask your terminal in plain English: a local AI assistant for bash and zsh"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+authors = [{ name = "deltaXmodules" }]
+keywords = ["linux", "terminal", "shell", "ollama", "llm", "cli"]
+classifiers = [
+    "Environment :: Console",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Shells",
+]
+
+[project.optional-dependencies]
+rag = ["chromadb", "tiktoken"]
+
+[project.scripts]
+tuxaide = "tuxaide.agent:main"
+tuxaide-index = "tuxaide.indexer:main"
+
+[project.urls]
+Homepage = "https://github.com/deltaxmodules/tuxaide"
+Issues = "https://github.com/deltaxmodules/tuxaide/issues"
+
+[tool.hatch.version]
+path = "agent.py"            # __version__ = "…"
+
+# The repository keeps its single-file layout; the wheel maps it into a package.
+[tool.hatch.build.targets.wheel]
+bypass-selection = true
+
+[tool.hatch.build.targets.wheel.force-include]
+"packaging/python/__init__.py" = "tuxaide/__init__.py"
+"agent.py" = "tuxaide/agent.py"
+"indexer.py" = "tuxaide/indexer.py"
+"hook.sh" = "tuxaide/hook.sh"
+"session_writer.py" = "tuxaide/session_writer.py"
+
+[tool.hatch.build.targets.sdist]
+include = ["/agent.py", "/indexer.py", "/hook.sh", "/session_writer.py", "/uninstall.sh",
+           "/install.sh", "/setup.sh", "/README.md", "/LICENSE", "/packaging", "/pyproject.toml"]

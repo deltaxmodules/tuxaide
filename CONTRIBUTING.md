@@ -11,6 +11,7 @@ Thanks for helping. Bug reports, fixes and new ideas are all welcome.
 | `install.sh` / `setup.sh` | Installer (`setup.sh` downloads and runs `install.sh`) |
 | `indexer.py` | Builds the man-page knowledge base for Smart RAG |
 | `session_writer.py` | Saves the output of `tuxaide run` for follow-up questions |
+| `pyproject.toml`, `packaging/` | pipx/PyPI package, Homebrew formula and AUR PKGBUILD templates |
 | `tests/` | The test suite |
 
 ## Running the tests
@@ -29,7 +30,7 @@ command-not-found hook).
 ## Linting
 
 ```bash
-shellcheck -S warning hook.sh install.sh setup.sh uninstall.sh
+shellcheck -S warning hook.sh install.sh setup.sh uninstall.sh scripts/render-packaging.sh
 python3 -m pip install ruff && ruff check .
 ```
 
@@ -37,15 +38,24 @@ CI runs both, plus the tests on Linux (Python 3.9, 3.12, 3.13) and macOS.
 
 ## Releasing
 
-The version lives in `__version__` in `agent.py`. To release:
+The version lives in `__version__` in `agent.py`.
 
 1. Bump `__version__`, `TUXAIDE_VERSION` in `install.sh` and the version badge in
-   `README.md` (`tests/test_version.py` fails if they differ).
-2. Merge to `main`, then create a GitHub release tagged `v<version>` (e.g. `v2.3.0`).
+   `README.md` (`tests/test_version.py` fails if they differ). Merge to `main`.
+2. Push the tag: `git tag v2.3.0 && git push origin v2.3.0`. The **Release** workflow
+   checks the tag matches `__version__` and publishes the GitHub release with
+   `install.sh`, `setup.sh`, `SHA256SUMS`, the wheel/sdist, and a filled-in
+   `tuxaide.rb` and `PKGBUILD`.
+3. Homebrew: copy `tuxaide.rb` from the release to `Formula/tuxaide.rb` in the
+   `deltaxmodules/homebrew-tap` repository.
+4. AUR: copy `PKGBUILD` and `tuxaide.install` to the `aur.archlinux.org/tuxaide.git`
+   clone, run `makepkg --printsrcinfo > .SRCINFO`, commit and push.
+5. PyPI: `twine upload` the wheel and sdist from the release.
 
-`tuxaide update` installs the files of the latest release's tag and checks that
-`agent.py` there carries the same version as the tag, so the tag and
-`__version__` must match.
+The curl installer and `tuxaide update` download the files of the release's tag and
+check them against its `SHA256SUMS`; until a release exists, the installer falls back
+to `main`. Templates: `packaging/homebrew/tuxaide.rb.in`, `packaging/aur/PKGBUILD.in`;
+`scripts/render-packaging.sh <version>` fills them in by hand.
 
 ## Ground rules
 

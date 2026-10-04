@@ -352,3 +352,25 @@ def test_update_loads_the_new_hook(sh, github):
     assert "→ 9.9.9" in out and "New hook loaded" in out
     assert "NEW-HOOK-LOADED" in sh.run("_tux_new_marker")
     assert "TuxAide 9.9.9" in sh.run("tuxaide --version")
+
+
+# ── P10: the shell's previous command-not-found handler is kept ──────
+
+def test_previous_handler_is_chained(sh, ollama):
+    handler = "command_not_found_handler" if sh.name == "zsh" else "command_not_found_handle"
+    rc = sh.home / (".zshrc" if sh.name == "zsh" else ".bashrc")
+    text = rc.read_text()
+    rc.write_text(text.replace("source ~/.config/tuxaide/hook.sh",
+                               f'{handler}() {{ echo "PREV-HANDLER $1" >&2; return 127; }}\n'
+                               "source ~/.config/tuxaide/hook.sh"))
+    shell = Shell(sh.name, sh.home)
+    try:
+        out = shell.run("xyzzyq")                       # nothing for TuxAide → the old handler answers
+        assert "PREV-HANDLER xyzzyq" in out and "command not found" not in out
+        out = shell.ask("how do I list hidden files")   # questions still go to TuxAide
+        assert "TuxAide (" in out and "PREV-HANDLER" not in out
+        shell.run("tuxaide off")
+        assert "PREV-HANDLER xyzzyq" in shell.run("xyzzyq")
+        shell.run("tuxaide on")
+    finally:
+        shell.close()

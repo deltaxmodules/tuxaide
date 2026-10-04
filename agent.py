@@ -1239,7 +1239,8 @@ CNF_HELPER = "/usr/lib/command-not-found"
 def command_not_found_helper(typed):
     """The distro's own hint for a missing command, or "" when it has nothing
     to offer (its bare "x: command not found" adds nothing)."""
-    if not typed or not os.path.exists(CNF_HELPER):
+    # The shell's own previous handler runs after TuxAide (see hook.sh): don't say it twice.
+    if not typed or os.environ.get("TUXAIDE_PREV_CNF") or not os.path.exists(CNF_HELPER):
         return ""
     try:
         p = subprocess.run([CNF_HELPER, "--", typed], capture_output=True, text=True, timeout=5)
@@ -1473,6 +1474,8 @@ HELP = """\
    tuxaide reindex               — re-index all man pages
    tuxaide cache [clear]         — show / clear cached answers
    tuxaide update [--check]      — update to the latest release
+   tuxaide setup                 — set up the model, Smart RAG and your shell
+   tuxaide uninstall             — remove TuxAide (asks first)
    tuxaide --timing              — show recent query performance
    tuxaide --version             — show the version"""
 
@@ -1685,6 +1688,423 @@ def cache_cmd(args):
     print("Usage: tuxaide cache [clear]")
     return 2
 
+# ── Where this copy lives: installer, Homebrew, pipx, a system package, a checkout
+VENV_DIR   = os.path.expanduser("~/.local/share/tuxaide/venv")
+INDEX_PID  = os.path.expanduser("~/.config/tuxaide/index.pid")
+INDEX_LOG  = os.path.join(LOG_DIR, "index.log")
+
+def agent_dir():
+    return os.path.dirname(os.path.realpath(__file__))
+
+def install_kind():
+    """"installer" (curl | bash), "homebrew", "pipx", "system" (AUR / distro) or "checkout"."""
+    me = os.path.realpath(__file__)
+    if me == os.path.realpath(os.path.join(BIN_DIR, "tuxaide")):
+        return "installer"
+    if "/Cellar/" in me or "/homebrew/" in me.lower() or "/linuxbrew/" in me:
+        return "homebrew"
+    if "/pipx/venvs/" in me:
+        return "pipx"
+    if me.startswith(("/usr/", "/opt/")):
+        return "system"
+    return "checkout"
+
+UPGRADE_HINT = {
+    "homebrew": "brew upgrade tuxaide",
+    "pipx":     "pipx upgrade tuxaide",
+    "system":   "your package manager (e.g. yay -Syu tuxaide)",
+    "checkout": "git pull",
+}
+
+def shipped_file(name):
+    """hook.sh, session_writer.py or indexer.py from the same installation as this agent."""
+    launcher = os.path.dirname(os.path.abspath(sys.argv[0]))   # symlinks kept: stable across upgrades
+    for d in (os.path.join(launcher, "..", "share", "tuxaide"),     # Homebrew, AUR: bin/../share/tuxaide
+              agent_dir(),                                          # pipx, git checkout
+              os.path.join(agent_dir(), "..", "share", "tuxaide"),
+              os.path.expanduser("~/.config/tuxaide")):             # curl installer
+        p = os.path.normpath(os.path.join(d, name))
+        if os.path.isfile(p):
+            return p
+    return None
+
+# ── Model tiers (the installer has the same table) ────────────────────
+# (minimum RAM in MB, model, download bytes from registry.ollama.ai)
+TIERS = [
+    (7000, "qwen2.5-coder:7b", 4_683_087_074),
+    (4500, "qwen2.5:3b",       1_929_911_945),
+    (2800, "qwen2.5:1.5b",       986_061_405),
+    (0,    "qwen2.5:0.5b",       397_820_829),
+]
+EMBED_SIZE = 274_302_030   # nomic-embed-text
+
+def total_memory():
+    """Total RAM in bytes (the cgroup limit in a container), or None."""
+    try:
+        if sys.platform == "darwin":
+            return int(subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True,
+                                      text=True, timeout=3).stdout)
+        total = None
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    total = int(line.split()[1]) * 1024
+        try:
+            with open("/sys/fs/cgroup/memory.max") as f:
+                limit = f.read().strip()
+            if limit.isdigit() and (total is None or int(limit) < total):
+                total = int(limit)
+        except OSError:
+            pass
+        return total
+    except Exception:
+        return None
+
+def tier_for(ram_bytes):
+    mb = (ram_bytes or 0) // 2 ** 20
+    return next((name, size) for floor, name, size in TIERS if mb >= floor)
+
+# ── Shell rc block ────────────────────────────────────────────────────
+RC_BEGIN = "# >>> TuxAide >>>"
+RC_END   = "# <<< TuxAide <<<"
+# What older installers wrote, matched exactly so nothing else is touched.
+LEGACY_RC_LINES = (
+    re.compile(r'^source ".*/tuxaide/hook\.sh"  # TuxAide$'),
+    re.compile(r'^export PATH="\$HOME/\.local/bin:\$PATH"  # TuxAide$'),
+)
+
+def rc_file(shell):
+    return os.path.expanduser("~/.zshrc" if shell == "zsh" else "~/.bashrc")
+
+def _home_relative(path):
+    home = os.path.expanduser("~")
+    return "$HOME" + path[len(home):] if path.startswith(home + os.sep) else path
+
+def tilde(path):
+    """~/… for messages."""
+    home = os.path.expanduser("~")
+    return "~" + path[len(home):] if path.startswith(home + os.sep) else path
+
+def rc_block(hook_path, add_path):
+    lines = [RC_BEGIN]
+    if add_path:
+        lines.append('export PATH="$HOME/.local/bin:$PATH"')
+    lines += [f'source "{_home_relative(hook_path)}"', RC_END]
+    return lines
+
+def strip_tuxaide_lines(lines):
+    """The rc file without TuxAide's block and without lines older installers wrote."""
+    out, inside = [], False
+    for line in lines:
+        if line == RC_BEGIN:
+            inside = True
+        elif line == RC_END and inside:
+            inside = False
+        elif not inside and not any(p.match(line) for p in LEGACY_RC_LINES):
+            out.append(line)
+    return out
+
+def write_rc(path, new_lines, old_text):
+    """Write the rc file, keeping a timestamped backup of what was there."""
+    if old_text:
+        backup = f"{path}.tuxaide-{time.strftime('%Y%m%d-%H%M%S')}.bak"
+        with open(backup, "w") as f:
+            f.write(old_text)
+    tmp = path + ".tuxaide-tmp"
+    with open(tmp, "w") as f:
+        f.write("\n".join(new_lines) + ("\n" if new_lines else ""))
+    if os.path.exists(path):
+        shutil.copymode(path, tmp)
+    os.replace(tmp, path)
+
+def install_rc_block(shell, hook_path):
+    """Add (or refresh) TuxAide's block at the end of the shell's rc. Returns (path, changed)."""
+    path = rc_file(shell)
+    try:
+        with open(path) as f:
+            old = f.read()
+    except FileNotFoundError:
+        old = ""
+    kept = strip_tuxaide_lines(old.splitlines())
+    on_path = BIN_DIR in os.environ.get("PATH", "").split(os.pathsep) or any(
+        ".local/bin" in line and not line.lstrip().startswith("#") for line in kept)
+    add_path = install_kind() == "installer" and not on_path
+    # Appended as is: every line already there stays untouched, so removing the
+    # block later gives back exactly the original file.
+    new = kept + rc_block(hook_path, add_path)
+    if old.splitlines() == new:
+        return path, False
+    write_rc(path, new, old)
+    return path, True
+
+def remove_rc_block(path):
+    """Remove TuxAide's lines from one rc file (with a backup). True when something changed."""
+    try:
+        with open(path) as f:
+            old = f.read()
+    except OSError:
+        return False
+    lines = old.splitlines()
+    new = strip_tuxaide_lines(lines)
+    if new == lines:
+        return False
+    write_rc(path, new, old)
+    return True
+
+# ── Smart RAG environment ─────────────────────────────────────────────
+def venv_python():
+    p = os.path.join(VENV_DIR, "bin", "python")
+    return p if os.access(p, os.X_OK) else None
+
+def use_rag_venv():
+    """Re-run under TuxAide's RAG virtualenv when chromadb lives only there
+    (Homebrew / AUR installs use the system Python)."""
+    import importlib.util
+    py = venv_python()
+    if (not py or os.environ.get("TUXAIDE_IN_VENV") or os.path.realpath(sys.prefix) == os.path.realpath(VENV_DIR)
+            or importlib.util.find_spec("chromadb") is not None):
+        return
+    os.environ["TUXAIDE_IN_VENV"] = "1"
+    try:
+        os.execv(py, [py, os.path.realpath(__file__), *sys.argv[1:]])
+    except OSError:
+        pass
+
+def create_rag_venv():
+    """Install chromadb into TuxAide's own virtualenv. True when it works."""
+    print(f"🐧 Installing the Smart RAG dependencies (chromadb) into {tilde(VENV_DIR)} — a few minutes...")
+    log = os.path.join(LOG_DIR, "venv.log")
+    os.makedirs(LOG_DIR, exist_ok=True)
+    candidates = [sys.executable] + [p for v in ("3.13", "3.12", "3.11", "3.10")
+                                     if (p := shutil.which(f"python{v}"))]
+    with open(log, "w") as out:
+        for py in candidates:
+            shutil.rmtree(VENV_DIR, ignore_errors=True)
+            steps = [[py, "-m", "venv", VENV_DIR],
+                     [os.path.join(VENV_DIR, "bin", "python"), "-m", "pip", "install", "-q", "--upgrade", "pip"],
+                     [os.path.join(VENV_DIR, "bin", "python"), "-m", "pip", "install", "-q", "chromadb", "tiktoken"],
+                     [os.path.join(VENV_DIR, "bin", "python"), "-c", "import chromadb, tiktoken"]]
+            if all(subprocess.run(s, stdout=out, stderr=subprocess.STDOUT).returncode == 0 for s in steps):
+                return True
+    shutil.rmtree(VENV_DIR, ignore_errors=True)
+    print(f"{C.O}⚠ Couldn't install chromadb (details: {log}). Staying in LLM mode.{C.Z}")
+    return False
+
+def indexer_command():
+    """The indexer of this same installation (not whatever tuxaide-index is first on PATH)."""
+    beside = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "tuxaide-index")
+    if os.access(beside, os.X_OK):                    # installer, Homebrew, AUR, pipx
+        return [beside]
+    script = shipped_file("indexer.py")               # git checkout
+    if script:
+        return [venv_python() or sys.executable, script]
+    exe = shutil.which("tuxaide-index")
+    return [exe] if exe else None
+
+def indexing_pid():
+    """PID of a man-page indexing still running in the background, or None."""
+    try:
+        with open(INDEX_PID) as f:
+            pid = int(f.read())
+        os.kill(pid, 0)
+        return pid
+    except (OSError, ValueError):
+        return None
+
+def start_background_index():
+    cmd = indexer_command()
+    if not cmd:
+        return False
+    os.makedirs(LOG_DIR, exist_ok=True)
+    with open(INDEX_LOG, "w") as log:
+        p = subprocess.Popen([*cmd, "--all"], stdout=log, stderr=subprocess.STDOUT,
+                             stdin=subprocess.DEVNULL, start_new_session=True,
+                             env={**os.environ, "PYTHONUNBUFFERED": "1"})   # progress in the log as it goes
+    with open(INDEX_PID, "w") as f:
+        f.write(str(p.pid))
+    return True
+
+def index_count(c):
+    try:
+        import chromadb
+        db_path = os.path.expanduser(c.get("rag_db_path", "~/.config/tuxaide/vectordb"))
+        if os.path.exists(db_path):
+            return chromadb.PersistentClient(path=db_path).get_collection("tuxaide_manpages").count()
+    except Exception:
+        pass
+    return 0
+
+# ── setup ─────────────────────────────────────────────────────────────
+SETUP_USAGE = """\
+Usage: tuxaide setup [--yes] [--model <name>] [--rag | --no-rag] [--shell zsh|bash]
+  Sets up TuxAide after installing it (Homebrew, AUR, pipx or the installer):
+  settings, the AI model, Smart RAG and the line in your shell's rc file."""
+
+def parse_setup_args(args):
+    opts = {"yes": False, "model": None, "rag": None, "shell": None, "doctor": True}
+    it = iter(args)
+    for a in it:
+        if a in ("--yes", "-y"):
+            opts["yes"] = True
+        elif a in ("--model", "--shell"):
+            opts[a[2:]] = next(it, None)
+            if not opts[a[2:]]:
+                raise ValueError(f"{a} needs a value")
+        elif a in ("--rag", "--no-rag"):
+            opts["rag"] = a == "--rag"
+        elif a == "--no-doctor":
+            opts["doctor"] = False
+        else:
+            raise ValueError(f"unknown option: {a}")
+    if opts["model"]:
+        _parse_model(opts["model"])
+    if opts["shell"] not in (None, "zsh", "bash"):
+        raise ValueError("--shell must be zsh or bash")
+    return opts
+
+def setup_cmd(args):
+    try:
+        opts = parse_setup_args(args)
+    except ValueError as e:
+        print(f"{e}\n{SETUP_USAGE}")
+        return 2
+    yes = opts["yes"]
+    def confirm(question):
+        return True if yes else ask_yes(f"{question} [y/N] ")
+
+    print(f"🐧 TuxAide {__version__} setup")
+    # 1. Settings: keep everything already there, fill in the rest.
+    try:
+        with open(CFG_FILE) as f:
+            existing = json.load(f)
+    except FileNotFoundError:
+        existing = {}
+    except ValueError as e:
+        print(f"{C.O}⚠ {CFG_FILE} isn't valid JSON ({e}); fix or delete it first.{C.Z}")
+        return 1
+    ram = total_memory()
+    updates = {k: v for k, v in DEFAULTS.items() if k not in existing}
+    if "model" not in existing:
+        updates["model"] = tier_for(ram)[0]
+    if "prewarm" not in existing and ram and ram < 7000 * 2 ** 20:
+        updates["prewarm"] = "off"      # a resident model hurts more than it helps on small machines
+    if opts["model"]:
+        updates["model"] = opts["model"]
+    save_cfg(updates)
+    c = cfg()
+    print(f"  ✓ Settings: {tilde(CFG_FILE)} (model {c['model']})")
+
+    # 2. The model (a local Ollama only; remote backends have their own).
+    local_ollama = c.get("backend", "ollama") == "ollama" and not is_remote(c)
+    models = ollama_models(c) if c.get("backend", "ollama") == "ollama" else None
+    if c.get("backend", "ollama") != "ollama":
+        print(f"  · Backend {c['backend']} at {c.get('api_base') or '(api_base not set)'}: nothing to download")
+    elif models is None:
+        print(f"  {C.O}⚠ Ollama isn't answering at {c['ollama_url']}.{C.Z} {ollama_down_hint(c)}")
+        print("    Then run tuxaide setup again to download the model.")
+    elif find_model(c["model"], models):
+        print(f"  ✓ Model {c['model']} is downloaded")
+    elif not local_ollama:
+        print(f"  {C.O}⚠ {c['ollama_url']} doesn't have {c['model']}. Download it there: ollama pull {c['model']}{C.Z}")
+    else:
+        size = next((s for _, n, s in TIERS if n == c["model"]), None)
+        what = f"{c['model']} ({human_size(size)})" if size else c["model"]
+        if confirm(f"Download the model {what} now?") and shutil.which("ollama"):
+            env = {**os.environ, "OLLAMA_HOST": c["ollama_url"]}
+            if subprocess.run(["ollama", "pull", c["model"]], env=env).returncode == 0:
+                print(f"  ✓ Model {c['model']} downloaded")
+                models = ollama_models(c)
+            else:
+                print(f"  {C.O}⚠ Download failed. Try again with: ollama pull {c['model']}{C.Z}")
+        else:
+            print(f"  · Download it later with: ollama pull {c['model']}")
+
+    # 3. Smart RAG: only when asked for (or confirmed), with a local Ollama.
+    want_rag = opts["rag"]
+    if want_rag is None and not yes and local_ollama and models is not None \
+            and (ram or 0) >= 4500 * 2 ** 20 and c.get("mode", "llm") == "llm":
+        want_rag = ask_yes("Enable Smart RAG (answers backed by this system's man pages)? [y/N] ")
+    if want_rag is False and c.get("mode") != "llm":
+        set_mode("llm")
+        print("  · Smart RAG off (mode LLM)")
+    elif want_rag:
+        if not local_ollama:
+            print("  · Smart RAG needs a local Ollama; skipped")
+        elif rag_available() or (venv_python() and _venv_has_chromadb()) or create_rag_venv():
+            embed_model = c.get("embed_model", "nomic-embed-text")
+            if models is not None and not find_model(embed_model, models) and shutil.which("ollama"):
+                print(f"  Downloading {embed_model} ({human_size(EMBED_SIZE)})...")
+                subprocess.run(["ollama", "pull", embed_model], env={**os.environ, "OLLAMA_HOST": c["ollama_url"]})
+            save_cfg({"mode": "smart", "rag_top_k": 1, "max_tokens": 300})
+            if indexing_pid():
+                print("  · Man pages are already being indexed in the background")
+            elif index_count(c):
+                print(f"  ✓ Smart RAG on ({index_count(c)} man-page passages indexed)")
+            elif start_background_index():
+                print("  ✓ Smart RAG on. Indexing man pages in the background (a few minutes);")
+                print("    until it finishes, answers come from the model alone.")
+                print(f"    {C.D}Progress: tuxaide doctor · log: {tilde(INDEX_LOG)}{C.Z}")
+            else:
+                print(f"  {C.O}⚠ tuxaide-index not found; run tuxaide reindex later{C.Z}")
+
+    # 4. The shell.
+    shell = opts["shell"] or os.environ.get("TUXAIDE_SHELL") or os.path.basename(os.environ.get("SHELL", "")) or "bash"
+    if shell not in ("zsh", "bash"):
+        print(f"  {C.O}⚠ TuxAide works in zsh and bash, not {shell}. Use: tuxaide setup --shell zsh{C.Z}")
+    else:
+        hook = shipped_file("hook.sh")
+        if not hook:
+            print(f"  {C.O}⚠ hook.sh not found next to {agent_dir()}; reinstall TuxAide{C.Z}")
+        else:
+            path, changed = install_rc_block(shell, hook)
+            if changed:
+                print(f"  ✓ Added TuxAide to {tilde(path)} (backup kept next to it)")
+                print(f"    {C.B}Open a new terminal, or run: source {tilde(path)}{C.Z}")
+            else:
+                print(f"  ✓ {tilde(path)} already loads TuxAide")
+
+    if opts["doctor"]:
+        print()
+        doctor(after_setup=True)
+    return 0
+
+def _venv_has_chromadb():
+    py = venv_python()
+    return bool(py) and subprocess.run([py, "-c", "import chromadb"], capture_output=True).returncode == 0
+
+# ── uninstall ─────────────────────────────────────────────────────────
+def uninstall_cmd(args):
+    if any(a not in ("--yes", "-y", "--keep-data") for a in args):
+        print("Usage: tuxaide uninstall [--yes] [--keep-data]")
+        return 2
+    keep = "--keep-data" in args
+    what = "TuxAide's shell setup" + ("" if keep else ", settings, history, cache and man-page index")
+    if "--yes" not in args and "-y" not in args:
+        if not ask_yes(f"Remove {what}? [y/N] "):
+            print("Cancelled." + ("" if sys.stdin.isatty() else " (use --yes when there's no terminal)"))
+            return 1
+    for rc in [rc_file("zsh"), rc_file("bash"), os.path.expanduser("~/.profile")]:
+        if remove_rc_block(rc):
+            print(f"  ✓ Removed TuxAide's lines from {rc.replace(os.path.expanduser('~'), '~', 1)} (backup kept)")
+    kind = install_kind()
+    if kind == "installer":
+        for p in [os.path.join(BIN_DIR, n) for n in ("tuxaide", "tuxaide-index", "tuxaide-uninstall")] + \
+                 [os.path.expanduser(f"~/.config/tuxaide/{n}") for n in ("hook.sh", "session_writer.py")]:
+            if os.path.exists(p):
+                os.remove(p)
+        print("  ✓ Removed the TuxAide programs from ~/.local/bin")
+    if not keep:
+        shutil.rmtree(os.path.dirname(CFG_FILE), ignore_errors=True)
+        shutil.rmtree(os.path.dirname(VENV_DIR), ignore_errors=True)
+        print("  ✓ Removed ~/.config/tuxaide and ~/.local/share/tuxaide")
+    if kind in ("homebrew", "pipx", "system"):
+        cmd = {"homebrew": "brew uninstall tuxaide", "pipx": "pipx uninstall tuxaide",
+               "system": "sudo pacman -R tuxaide   (or your package manager)"}[kind]
+        print(f"  → Finish with: {cmd}")
+    print(f"{C.D}  Ollama and its models were not removed (ollama rm <model> frees their space).{C.Z}")
+    print("  Done. Open a new terminal.")
+    return 0
+
 # ── doctor ────────────────────────────────────────────────────────────
 def available_memory():
     """Bytes of memory free for a model, or None when unknown."""
@@ -1718,7 +2138,7 @@ def available_memory():
     return None
 
 # Smaller models to suggest, largest first (download sizes from registry.ollama.ai).
-LIGHT_MODELS = [("qwen2.5:3b", 1_929_911_945), ("qwen2.5:1.5b", 986_061_405), ("qwen2.5:0.5b", 397_820_829)]
+LIGHT_MODELS = [(name, size) for _, name, size in TIERS[1:]]
 
 def smaller_model_hint(size):
     """What to switch to when a model of `size` bytes doesn't fit."""
@@ -1782,9 +2202,10 @@ def doctor_api(d, c):
     else:
         d.fail(f"The API doesn't offer model {c['model']}", "pick one of its models: tuxaide model")
 
-def doctor():
+def doctor(after_setup=False):
     """Check the whole setup; every problem comes with the command that fixes it.
-    Exit code 1 when something is broken, so it also works in scripts and CI."""
+    Exit code 1 when something is broken, so it also works in scripts and CI.
+    after_setup: run by `tuxaide setup`, before any shell has loaded the new hook."""
     import platform
     d = Doctor()
     home = os.path.expanduser("~")
@@ -1882,7 +2303,9 @@ def doctor():
                     count = chromadb.PersistentClient(path=db_path).get_collection("tuxaide_manpages").count()
             except Exception:
                 count = 0
-            if count:
+            if indexing_pid():
+                d.info(f"Man pages are being indexed in the background ({count} passages so far)")
+            elif count:
                 d.ok(f"Man-page index: {count} passages")
             else:
                 d.warn("The man-page index is empty", "tuxaide reindex")
@@ -1904,9 +2327,9 @@ def doctor():
     else:
         d.fail("The hook isn't in ~/.zshrc or ~/.bashrc",
                f"echo 'source \"$HOME/.config/tuxaide/hook.sh\"  # TuxAide' >> ~/.{shell}rc")
-    if not os.path.exists(HOOK_FILE):
-        d.fail(f"{short(HOOK_FILE)} is missing", "re-run the installer")
-    if not os.environ.get("TUXAIDE_SHELL_PID"):
+    if not shipped_file("hook.sh"):
+        d.fail("TuxAide's hook.sh is missing", "reinstall TuxAide (or re-run the installer)")
+    if not os.environ.get("TUXAIDE_SHELL_PID") and not after_setup:
         d.warn("The hook isn't loaded in this terminal", f"source ~/.{shell}rc   (or open a new terminal)")
     handler = os.environ.get("TUXAIDE_HANDLER", "")
     if handler == "ours":
@@ -1920,7 +2343,17 @@ def doctor():
     elif handler == "old-bash":
         d.fail(f"bash {os.environ.get('BASH_VERSION', '')} is too old for TuxAide's hook (needs bash 4+)",
                "use zsh (chsh -s /bin/zsh), or a newer bash: brew install bash")
-    if BIN_DIR not in os.environ.get("PATH", "").split(os.pathsep):
+    rc_text = ""
+    for rc in shell_rc_files():
+        try:
+            with open(rc, errors="replace") as f:
+                rc_text += f.read()
+        except OSError:
+            pass
+    in_rc = any(".local/bin" in line and "PATH" in line and not line.lstrip().startswith("#")
+                for line in rc_text.splitlines())
+    if install_kind() == "installer" and BIN_DIR not in os.environ.get("PATH", "").split(os.pathsep) \
+            and not (after_setup and in_rc):
         d.warn("~/.local/bin isn't on your PATH (tuxaide-index and tuxaide-uninstall need it)",
                f"echo 'export PATH=\"$HOME/.local/bin:$PATH\"' >> ~/.{shell}rc")
 
@@ -1970,6 +2403,18 @@ def latest_release():
     rel = json.loads(_github(f"{api}/repos/{repo}/releases/latest"))
     return rel["tag_name"], rel.get("html_url", f"https://github.com/{repo}/releases")
 
+def release_checksums(tag):
+    """{file: sha256} from the release's SHA256SUMS asset, or None when it has none."""
+    web = os.environ.get("TUXAIDE_GITHUB_WEB", "https://github.com")
+    repo = os.environ.get("TUXAIDE_REPO", "deltaxmodules/tuxaide")
+    try:
+        text = _github(f"{web}/{repo}/releases/download/{tag}/SHA256SUMS").decode()
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None
+        raise
+    return {name.lstrip("*"): digest for digest, name in (line.split() for line in text.splitlines() if line.strip())}
+
 def _check_download(name, data, tag):
     """Refuse to install something that isn't what it should be."""
     text = data.decode("utf-8")
@@ -2016,10 +2461,9 @@ def update_cmd(args):
         print(f"   TuxAide {latest} is available. Update with: tuxaide update")
         print(f"{C.D}   What's new: {page}{C.Z}")
         return 0
-    installed = UPDATE_FILES[0][1]
-    if os.path.realpath(os.path.abspath(sys.argv[0])) != os.path.realpath(installed):
-        print(f"{C.O}⚠ This TuxAide ({sys.argv[0]}) isn't the installed one ({installed}).{C.Z}")
-        print(f"{C.D}  If it's a git checkout, update it with: git pull{C.Z}")
+    kind = install_kind()
+    if kind != "installer":
+        print(f"   TuxAide {latest} is available. This copy is managed by {kind}: update it with {UPGRADE_HINT[kind]}")
         return 1
     raw = os.environ.get("TUXAIDE_GITHUB_RAW", "https://raw.githubusercontent.com")
     repo = os.environ.get("TUXAIDE_REPO", "deltaxmodules/tuxaide")
@@ -2033,6 +2477,18 @@ def update_cmd(args):
             print(f"{C.O}⚠ Couldn't download {name} from {tag}: {e}. Nothing was changed.{C.Z}")
             return 1
         downloads[name] = data
+    try:
+        sums = release_checksums(tag)
+    except Exception as e:
+        print(f"{C.O}⚠ Couldn't read {tag}'s SHA256SUMS: {e}. Nothing was changed.{C.Z}")
+        return 1
+    if sums is None:
+        print(f"{C.D}   ({tag} has no SHA256SUMS; files checked for content only){C.Z}")
+    else:
+        for name, data in downloads.items():
+            if sums.get(name) != hashlib.sha256(data).hexdigest():
+                print(f"{C.O}⚠ {name} doesn't match {tag}'s SHA256SUMS. Nothing was changed.{C.Z}")
+                return 1
     for name, dest in targets:
         _install_file(dest, downloads[name])
     print(f"{C.G}✓{C.Z} Updated TuxAide {__version__} → {latest}. Settings, history and cache were kept.")
@@ -2046,6 +2502,9 @@ def main():
         return
     mode_arg = sys.argv[1]
     args = sys.argv[2:]
+    if mode_arg in ("--ask", "--not-found", "--why", "--explain-last", "doctor", "setup", "mode") \
+            or not mode_arg.startswith("-"):
+        use_rag_venv()
 
     if mode_arg in ("--version", "-V", "version"):
         print(f"TuxAide {__version__}")
@@ -2053,7 +2512,8 @@ def main():
     commands = {"doctor": lambda: doctor(), "config": lambda: config_cmd(args),
                 "model": lambda: model_cmd(args), "modelo": lambda: model_cmd(args),
                 "cache": lambda: cache_cmd(args), "update": lambda: update_cmd(args),
-                "status": lambda: status_cmd()}
+                "status": lambda: status_cmd(), "setup": lambda: setup_cmd(args),
+                "uninstall": lambda: uninstall_cmd(args)}
     if mode_arg in commands:
         # Plain text when piped (e.g. doctor's output pasted into a bug report).
         if not sys.stdout.isatty() or not cfg().get("color", True):
