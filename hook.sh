@@ -276,6 +276,10 @@ if [[ -n "${ZSH_VERSION:-}" ]]; then
     command_not_found_handler() {
         local cmd="$1"
         local line="$*"
+        if [[ "$_LG_ON" != "true" ]]; then
+            echo "zsh: command not found: $cmd" >&2
+            return 127
+        fi
         if _tux_should_handle_question_line "$line"; then
             mkdir -p "$_TUX_PENDING_DIR" && : > "${_TUX_PENDING_DIR}/$$.asked"
             # This handler runs in a subshell, so exporting here doesn't leak.
