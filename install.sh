@@ -430,7 +430,7 @@ WantedBy=multi-user.target"
     info "Waiting for Ollama to become available..."
     local n=0
     until curl -s http://localhost:11434/api/tags &>/dev/null; do
-        sleep 1; ((n++))
+        sleep 1; n=$((n + 1))   # not ((n++)): it returns 1 when n=0, and set -e exits
         [[ $n -ge 40 ]] && err "Ollama did not respond in 40s. Check: journalctl -u ollama -n 20"
         printf "."
     done
