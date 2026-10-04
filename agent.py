@@ -231,6 +231,9 @@ DESTRUCTIVE_PATTERNS = [
     r'DROP\s+DATABASE',         # SQL DROP DATABASE
     r':\(\)\s*\{.*\}',          # fork bomb
     r'\bkillall\b',             # killall
+    r'\bfind\b.*\s-delete\b',   # find … -delete
+    r'-exec(dir)?\s+rm\b',      # find … -exec rm {} \;
+    r'\bxargs\s+(-\S+\s+)*rm\b', # … | xargs rm
 ]
 
 def is_q(text):

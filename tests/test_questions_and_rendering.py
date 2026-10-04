@@ -43,12 +43,15 @@ def test_prompt_mirrors_the_users_language(agent):
 
 
 @pytest.mark.parametrize("text", ["rm -rf /old", "sudo rm file", "dd if=/dev/zero of=/dev/sda",
-                                  "mkfs.ext4 /dev/sdb1", "chmod 777 /", "DROP TABLE users"])
+                                  "mkfs.ext4 /dev/sdb1", "chmod 777 /", "DROP TABLE users",
+                                  "find . -size +100M -delete", "find /tmp -type f -exec rm {} \\;",
+                                  "find . -name '*.log' -execdir rm -- {} +", "ls *.tmp | xargs -0 rm"])
 def test_destructive_commands(agent, text):
     assert agent.is_destructive(text)
 
 
-@pytest.mark.parametrize("text", ["rm file.txt", "rmdir empty", "ls -la", "chmod 644 f"])
+@pytest.mark.parametrize("text", ["rm file.txt", "rmdir empty", "ls -la", "chmod 644 f",
+                                  "find . -size +100M", "find . -name '*.py' -exec grep -l TODO {} +"])
 def test_harmless_commands(agent, text):
     assert not agent.is_destructive(text)
 
