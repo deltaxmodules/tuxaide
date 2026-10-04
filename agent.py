@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """TuxAide v2.1 — Local AI assistant for Linux terminal with Smart RAG."""
 import sys, os, re, json, hashlib, time, urllib.request, urllib.error
-import textwrap, shutil, threading, itertools, subprocess
+import textwrap, shutil, threading, itertools, subprocess, base64, select
 
 CFG_FILE  = os.path.expanduser("~/.config/tuxaide/config.json")
 CACHE_DIR = os.path.expanduser("~/.config/tuxaide/cache")
 LOG_DIR   = os.path.expanduser("~/.config/tuxaide/logs")
 PERF_LOG  = os.path.join(LOG_DIR, "perf.log")
 SESSION_FILE = os.path.expanduser("~/.config/tuxaide/session.json")
+PENDING_DIR  = os.path.expanduser("~/.config/tuxaide/pending")
 
 DEFAULTS = {
     "ollama_url":   "http://localhost:11434",
@@ -25,6 +26,7 @@ DEFAULTS = {
     "prewarm":      "once",   # "off", "once" (at most every keep_alive), "always"
     "keep_alive":   "10m",    # how long Ollama keeps the model loaded
     "cache_ttl_days": 30,
+    "action_menu":  True,     # after an answer: put a command on the prompt / copy it
 }
 
 def _parse_bool(v):
@@ -51,6 +53,7 @@ SETTABLE = {
     "color":           _parse_bool,
     "model":           _parse_model,
     "prewarm":         _parse_choice("off", "once", "always"),
+    "action_menu":     _parse_bool,
 }
 
 def cfg():
@@ -475,8 +478,10 @@ class Renderer:
     Code blocks are buffered until they close so the destructive-command warning
     can be shown above the block that triggered it.
     """
-    def __init__(self, c, mode="llm", out=None):
+    def __init__(self, c, mode="llm", out=None, numbered=False):
         self.out   = out or sys.stdout
+        self.numbered = numbered
+        self.commands = []     # runnable commands found in shell code blocks
         self.color = c.get("color", True)
         self.model = c.get("model", "")
         self.mode  = mode
@@ -529,8 +534,19 @@ class Renderer:
             for w in textwrap.wrap(warning, width=self.cols - 4):
                 self._w(f"  {C.RD}{C.B}{w}{C.Z}" if color else f"  {w}")
         self._w(f"  {C.D}┄ {self.code_lang} ┄{C.Z}" if color else f"  ┄ {self.code_lang} ┄")
-        for line in self.code:
-            self._w(f"  {C.G}{line}{C.Z}" if color else f"  {line}")
+        starts = {}
+        if self.numbered and self.code_lang.lower() in SHELL_LANGS:
+            for idx, cmd in extract_commands(self.code):
+                if len(self.commands) < MAX_COMMANDS:
+                    self.commands.append(cmd)
+                    starts[idx] = len(self.commands)
+        pad = "    " if self.numbered and self.commands else ""
+        for i, line in enumerate(self.code):
+            if i in starts:
+                num = f"[{starts[i]}] "
+                self._w(f"  {C.Y}{num}{C.Z}{C.G}{line}{C.Z}" if color else f"  {num}{line}")
+            else:
+                self._w(f"  {pad}{C.G}{line}{C.Z}" if color else f"  {pad}{line}")
         rule = "┄" * (len(self.code_lang) + 4)
         self._w(f"  {C.D}{rule}{C.Z}" if color else f"  {rule}")
         self.code = None
@@ -556,15 +572,45 @@ class Renderer:
         for w in textwrap.wrap(line, width=self.cols - 4, break_long_words=False):
             self._w(f"  {w}")
 
+SHELL_LANGS  = {"shell", "bash", "sh", "zsh", "console", "terminal"}
+MAX_COMMANDS = 9
+
+def extract_commands(lines):
+    """Return [(line_index, command)] for the runnable lines of a shell code block.
+
+    Skips blank lines and comments, strips a leading "$ " prompt and joins
+    backslash continuations into one command.
+    """
+    out, i = [], 0
+    while i < len(lines):
+        s = lines[i].strip()
+        if not s or s.startswith("#"):
+            i += 1; continue
+        if s.startswith("$ "):
+            s = s[2:].strip()
+        start, parts = i, [s]
+        while parts[-1].endswith("\\") and i + 1 < len(lines):
+            i += 1
+            parts.append(lines[i].strip())
+        cmd = "\n".join(parts).strip()
+        if cmd and cmd not in (c for _, c in out):
+            out.append((start, cmd))
+        i += 1
+    return out
+
+def menu_enabled(c):
+    return bool(c.get("action_menu", True)) and sys.stdout.isatty() and sys.stdin.isatty()
+
 def render_text(text, c, mode="llm"):
-    """Render a complete answer (cache hits, messages) in one go."""
-    r = Renderer(c, mode)
+    """Render a complete answer (cache hits, messages) in one go. Returns the commands found."""
+    r = Renderer(c, mode, numbered=menu_enabled(c))
     r.feed(text)
     r.finish()
+    return r.commands
 
 def answer_streaming(q, c, passages, mode, spinner):
-    """Stream the answer to the terminal. Returns (answer, ok, ttft)."""
-    r = Renderer(c, mode)
+    """Stream the answer to the terminal. Returns (answer, ok, ttft, commands)."""
+    r = Renderer(c, mode, numbered=menu_enabled(c))
     parts, ttft, ok = [], None, True
     t0 = time.time()
     try:
@@ -588,7 +634,112 @@ def answer_streaming(q, c, passages, mode, spinner):
         ok = False
         r.feed("[Error] Empty answer from the model.")
     r.finish()
-    return answer, ok, ttft
+    return answer, ok, ttft, (r.commands if ok else [])
+
+# ── After-answer actions: put a command on the prompt, or copy it ─────
+def read_key(tty, timeout, prompt=b""):
+    """Show prompt, then read one keypress without echo. Returns '' on timeout.
+
+    Raw mode is entered *before* the prompt is shown: keys typed while the
+    answer was streaming are discarded, and nothing pressed after the prompt
+    appears can be lost.
+    """
+    import termios, tty as ttymod
+    fd = tty.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        ttymod.setcbreak(fd, termios.TCSAFLUSH)
+        tty.write(prompt); tty.flush()
+        ready, _, _ = select.select([fd], [], [], timeout)
+        if not ready:
+            return ""
+        ch = os.read(fd, 1)
+        if ch == b"\x1b":                      # swallow the rest of an escape sequence
+            while select.select([fd], [], [], 0.02)[0]:
+                os.read(fd, 16)
+        return ch.decode(errors="ignore")
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+def copy_to_clipboard(text, tty):
+    """Copy with the first available tool; fall back to OSC 52 (works over SSH)."""
+    tools = [["pbcopy"]]
+    if os.environ.get("WAYLAND_DISPLAY"):
+        tools.append(["wl-copy"])
+    tools += [["xclip", "-selection", "clipboard"], ["xsel", "--clipboard", "--input"]]
+    for tool in tools:
+        if shutil.which(tool[0]):
+            try:
+                subprocess.run(tool, input=text.encode(), check=True,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
+                return True
+            except Exception:
+                continue
+    try:
+        tty.write(f"\033]52;c;{base64.b64encode(text.encode()).decode()}\a".encode())
+        tty.flush()
+        return True
+    except Exception:
+        return False
+
+def stage_for_prompt(cmd):
+    """Hand the command to the parent shell's prompt hook. False if no hook is listening."""
+    pid = os.environ.get("TUXAIDE_SHELL_PID", "")
+    if not pid.isdigit():
+        return False
+    try:
+        os.makedirs(PENDING_DIR, exist_ok=True)
+        with open(os.path.join(PENDING_DIR, pid), "w") as f:
+            f.write(cmd)
+        return True
+    except OSError:
+        return False
+
+def action_menu(commands, c, timeout=15):
+    if not commands or not menu_enabled(c):
+        return
+    try:
+        tty = open("/dev/tty", "r+b", buffering=0)
+    except OSError:
+        return
+    n = len(commands)
+    def say(msg, end="\n"):
+        tty.write(f"\r\033[K  {msg}{end}".encode()); tty.flush()
+    def pick(prompt):
+        try:
+            return read_key(tty, timeout, f"\r\033[K  {C.D}{prompt}{C.Z}".encode())
+        except KeyboardInterrupt:
+            return ""
+        finally:
+            tty.write(b"\r\033[K"); tty.flush()
+    def number(key):
+        return int(key) if key.isdigit() and 1 <= int(key) <= n else None
+
+    keys = "1" if n == 1 else f"1-{n}"
+    key = pick(f"{keys} put on prompt · c copy · Enter skip")
+    try:
+        if key.lower() == "c":
+            idx = 1 if n == 1 else number(pick(f"copy which? {keys}"))
+            if idx and copy_to_clipboard(commands[idx - 1], tty):
+                say(f"{C.G}✓ Copied:{C.Z} {commands[idx - 1]}")
+            return
+        idx = number(key)
+        if not idx:
+            return
+        cmd = commands[idx - 1]
+        if is_destructive(cmd):
+            if pick(f"{C.RD}⚠ Destructive command.{C.Z}{C.D} Put it on the prompt anyway? [y/N]").lower() != "y":
+                say(f"{C.D}Skipped.{C.Z}")
+                return
+        if stage_for_prompt(cmd):
+            if os.environ.get("TUXAIDE_SHELL") == "zsh":
+                say(f"{C.G}✓ On your prompt{C.Z}{C.D} — edit it or press Enter to run{C.Z}")
+            else:
+                say(f"{C.G}✓ Press ↑{C.Z}{C.D} to get it on your prompt{C.Z}")
+        elif copy_to_clipboard(cmd, tty):
+            say(f"{C.G}✓ Copied:{C.Z} {cmd}")
+    finally:
+        tty.close()
 
 def ollama_ok(c):
     try:
@@ -634,7 +785,8 @@ def main():
         user_q = " ".join(sys.argv[2:]).strip() or default_context_query()
         effective_q = build_contextual_question(user_q, last_run)
         spinner = Spinner().start()
-        answer_streaming(effective_q, c, None, "llm", spinner)
+        _, _, _, commands = answer_streaming(effective_q, c, None, "llm", spinner)
+        action_menu(commands, c)
         return
 
     # mode: switch between llm, smart, deep (rag kept as alias for deep)
@@ -720,7 +872,7 @@ def main():
         answer    = cached_answer["answer"]
         act_mode  = cached_answer.get("mode", "llm")
         perf_log(norm_q, act_mode + "+cache", 0, 0, 0, True)
-        render_text(answer, c, act_mode)
+        action_menu(render_text(answer, c, act_mode), c)
         return
 
     # ── Determine mode and whether to use RAG ────────────────────────
@@ -767,7 +919,7 @@ def main():
 
     # ── LLM call, streamed straight to the terminal ───────────────────
     t_llm_start = time.time()
-    answer, ok, ttft = answer_streaming(
+    answer, ok, ttft, commands = answer_streaming(
         effective_q, c, passages if passages else None, act_mode, spinner)
     t_llm = time.time() - t_llm_start
 
@@ -776,5 +928,7 @@ def main():
         cache_set("answers", ans_key, {"answer": answer, "mode": act_mode})
 
     perf_log(norm_q, act_mode, t_embed, t_rag, t_llm, False, ttft)
+
+    action_menu(commands, c)
 
 if __name__ == "__main__": main()

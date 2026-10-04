@@ -3,6 +3,14 @@ _LG="${HOME}/.local/bin/tuxaide"
 _TUX_CFG="${HOME}/.config/tuxaide/config.json"
 _TUX_SESSION_WRITER="${HOME}/.config/tuxaide/session_writer.py"
 _TUX_SESSION_FILE="${HOME}/.config/tuxaide/session.json"
+_TUX_PENDING_DIR="${HOME}/.config/tuxaide/pending"
+
+# Lets TuxAide hand a chosen command back to *this* shell's prompt. The
+# command-not-found handler runs in a subshell, so it can't edit the prompt
+# itself: it writes the command to pending/<pid>, and the prompt hook below
+# picks it up.
+export TUXAIDE_SHELL_PID=$$
+if [[ -n "${ZSH_VERSION:-}" ]]; then export TUXAIDE_SHELL=zsh; else export TUXAIDE_SHELL=bash; fi
 
 # Read the settings the hook needs at load time in a single python3 call.
 _tux_load_cfg() {
@@ -144,6 +152,29 @@ tuxaide() {
 # Short alias, only if 'tux' isn't already taken by something else.
 type tux >/dev/null 2>&1 || alias tux='tuxaide'
 
+# ── Put a command chosen in the answer menu on the prompt ──────────
+# zsh: straight into the edit buffer. bash can't pre-fill the prompt from a
+# hook, so the command goes into history: one ↑ brings it up, ready to edit.
+_tux_take_pending() {
+    local f="${_TUX_PENDING_DIR}/$$"
+    [[ -f "$f" ]] || return 0
+    local cmd
+    cmd="$(<"$f")"
+    rm -f "$f"
+    [[ -n "$cmd" ]] || return 0
+    if [[ -n "${ZSH_VERSION:-}" ]]; then
+        print -z -- "$cmd"
+    else
+        history -s -- "$cmd"
+    fi
+}
+if [[ -n "${BASH_VERSION:-}" ]]; then
+    case "${PROMPT_COMMAND:-}" in
+        *_tux_take_pending*) ;;
+        *) PROMPT_COMMAND="_tux_take_pending${PROMPT_COMMAND:+; $PROMPT_COMMAND}" ;;
+    esac
+fi
+
 # ── Automatic hook via command_not_found_handle ────────────────────
 command_not_found_handle() {
     local cmd="$1"
@@ -172,6 +203,7 @@ if [[ -n "${ZSH_VERSION:-}" ]]; then
     }
     autoload -Uz add-zsh-hook 2>/dev/null
     add-zsh-hook preexec _lg_preexec 2>/dev/null
+    add-zsh-hook precmd _tux_take_pending 2>/dev/null
 
     command_not_found_handler() {
         local cmd="$1"

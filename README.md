@@ -81,6 +81,24 @@ TuxAide intercepts it silently and answers inline:
 
 Normal commands (`ls -la`, `git commit`, `sudo apt update`) pass through untouched. **Zero interference.**
 
+### Put the command on your prompt
+
+Commands in the answer are numbered. Press a number and TuxAide puts that command on your prompt, ready to edit — it still never runs anything:
+
+```
+  ┄ shell ┄
+  [1] ls -laSh
+  [2] ls -laShr
+  ┄┄┄┄┄┄┄┄┄
+
+  1-2 put on prompt · c copy · Enter skip
+```
+
+- **zsh**: the command appears on your prompt.
+- **bash**: press **↑** to bring it up (bash can't pre-fill the prompt).
+- **c** copies it instead (`pbcopy`, `wl-copy`, `xclip`, `xsel`, or OSC 52 over SSH).
+- Destructive commands ask for confirmation first. Turn the menu off with `"action_menu": false`.
+
 ---
 
 ## Why TuxAide
@@ -186,6 +204,7 @@ Settings live in `~/.config/tuxaide/config.json`. Reinstalling keeps your existi
 | `prewarm` | `once` (`off` below 8 GB RAM) | Load the model when a shell opens: `off`, `once` (at most every 10 min), `always` |
 | `keep_alive` | `10m` | How long Ollama keeps the model in memory after a question |
 | `cache_ttl_days` | `30` | Cached answers older than this are ignored |
+| `action_menu` | `true` | After an answer, offer to put a command on the prompt or copy it |
 
 Smart RAG's Python dependencies (ChromaDB) are installed in TuxAide's own virtualenv at `~/.local/share/tuxaide/venv`, never in your system Python, so no `pip` command is needed. `tuxaide-uninstall` removes it.
 
