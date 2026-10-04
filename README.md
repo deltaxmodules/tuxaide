@@ -241,6 +241,17 @@ replaced it. Prompt themes like starship and powerlevel10k haven't been tested y
 
 **fish?** Not yet: TuxAide works in bash and zsh.
 
+**Does the hook see everything I type?** No. It only wakes up when the shell says “command not
+found”, and only sends the line to the model if it reads like a question. Type a password at the
+prompt by mistake and it isn't a question: you get the normal “command not found”, nothing goes to a
+model and TuxAide writes nothing to disk. (Your shell's own history keeps it, as it would without
+TuxAide.) If a line *is* taken as a question, it goes to your configured model and is kept as listed in
+[Privacy](#privacy-what-is-kept-and-where); `tuxaide new` and `tuxaide cache clear` delete it.
+
+**Do I have to use `curl | bash`?** No. Install with `pipx install tuxaide`, `brew install
+deltaxmodules/tap/tuxaide` or the [Arch PKGBUILD](#install). The script itself shows everything it
+will do before changing anything, and checks its files against the release's `SHA256SUMS`.
+
 **Is a question sent anywhere?** Only to the model you configured — the local Ollama by default.
 `tuxaide status` says where answers come from.
 

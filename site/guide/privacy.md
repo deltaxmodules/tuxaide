@@ -6,6 +6,12 @@ Everything stays on your computer, unless you set up a [remote backend](/guide/r
 
 Your question; with a follow-up, the last 3 exchanges; with `?`, the failed command line, its exit code and the error it printed when re-run; with `system_context` on, a one-line description of your system (`tuxaide system` shows it). With the default setup, “the model” is Ollama on your own computer.
 
+## What is never sent
+
+TuxAide only sees a line when the shell can't find its first word as a command, and only sends it if it reads like a question ([how it knows](/guide/how-it-knows)). Your normal commands never reach it.
+
+**A password typed at the prompt by mistake** isn't a question: you get the normal “command not found”, nothing goes to a model and TuxAide writes nothing to disk. Your shell's own history keeps the line, as it would without TuxAide. If a line *is* taken as a question, it's sent and kept as in the table below — `tuxaide new` and `tuxaide cache clear` remove it.
+
 ## What is kept, and how to delete it
 
 | What | Where | How to delete |
