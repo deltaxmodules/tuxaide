@@ -13,6 +13,7 @@ done
 rm -f ~/.local/bin/tuxaide ~/.local/bin/tuxaide-index ~/.local/bin/tuxaide-uninstall
 rm -f ~/.config/tuxaide/session.json ~/.config/tuxaide/session_writer.py ~/.config/tuxaide/session.lock
 rm -rf ~/.config/tuxaide
+rm -rf ~/.local/share/tuxaide   # RAG virtualenv (chromadb)
 echo -e "  ${GR}✓${R} Files removed"
 echo ""
 echo -e "  ${YL}Note: Ollama and models were NOT removed.${R}"

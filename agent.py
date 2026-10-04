@@ -648,7 +648,8 @@ def main():
         if new_mode not in ("llm", "smart", "deep"):
             print("Usage: tuxaide mode [llm|smart|deep]"); return
         if new_mode in ("smart", "deep") and not rag_available():
-            print(f"{C.O}⚠ RAG requires chromadb: pip install chromadb{C.Z}"); return
+            print(f"{C.O}⚠ RAG requires chromadb, which isn't installed.{C.Z}")
+            print(f"{C.D}  Re-run the TuxAide installer and answer Y to Smart RAG.{C.Z}"); return
         top_k = 1 if new_mode == "smart" else 3
         max_tokens = 300 if new_mode in ("llm", "smart") else 600
         save_cfg({"mode": new_mode, "rag_top_k": top_k, "max_tokens": max_tokens})

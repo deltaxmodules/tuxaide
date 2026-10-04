@@ -5,7 +5,7 @@ import os, sys, json, re, subprocess, urllib.request, urllib.error
 try:
     import chromadb
 except ImportError:
-    print("Error: chromadb not installed. Run: pip install chromadb")
+    print("Error: chromadb not installed. Re-run the TuxAide installer and answer Y to Smart RAG.")
     sys.exit(1)
 
 CFG_FILE = os.path.expanduser("~/.config/tuxaide/config.json")

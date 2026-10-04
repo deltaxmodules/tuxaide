@@ -187,6 +187,8 @@ Settings live in `~/.config/tuxaide/config.json`. Reinstalling keeps your existi
 | `keep_alive` | `10m` | How long Ollama keeps the model in memory after a question |
 | `cache_ttl_days` | `30` | Cached answers older than this are ignored |
 
+Smart RAG's Python dependencies (ChromaDB) are installed in TuxAide's own virtualenv at `~/.local/share/tuxaide/venv`, never in your system Python, so no `pip` command is needed. `tuxaide-uninstall` removes it.
+
 ---
 
 ## Shell Error Context (v2.2)
