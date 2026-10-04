@@ -5,6 +5,7 @@
 
 <div align="center">
 
+[![CI](https://github.com/deltaxmodules/tuxaide/actions/workflows/ci.yml/badge.svg)](https://github.com/deltaxmodules/tuxaide/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Ollama](https://img.shields.io/badge/Powered%20by-Ollama-blue)](https://ollama.com)
 [![Shell: bash/zsh](https://img.shields.io/badge/Shell-bash%20%7C%20zsh-lightgrey)](#compatibility)
@@ -299,7 +300,9 @@ RAM: 5GB minimum (8GB recommended)
 
 ## Contributing
 
-Open source project — contributions welcome.
+Open source project — contributions welcome. See [CONTRIBUTING.md](CONTRIBUTING.md)
+for how to run the tests (no Ollama needed) and [SECURITY.md](SECURITY.md) to
+report a vulnerability.
 
 👉 https://github.com/deltaxmodules/tuxaide
 
