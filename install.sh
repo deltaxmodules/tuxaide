@@ -557,6 +557,7 @@ defaults = {
     "cache_ttl_days": 30,
     "action_menu": True,
     "failure_hint": True,
+    "typo_suggest": True,
 }
 existing = {}
 try:
