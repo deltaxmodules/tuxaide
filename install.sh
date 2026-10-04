@@ -441,11 +441,19 @@ WantedBy=multi-user.target"
 # ═══════════════════════════════════════════════════════════════════════
 # STEP 5 — AI Models
 # ═══════════════════════════════════════════════════════════════════════
+# Exact name match: "qwen2.5:1.5b" must not count as present because
+# "qwen2.5-coder:7b" is ("llama3.2" means "llama3.2:latest").
+has_model() {
+    local want="$1"
+    [[ "$want" == *:* ]] || want="${want}:latest"
+    ollama list 2>/dev/null | awk 'NR > 1 {print $1}' | grep -qxF "$want"
+}
+
 download_models() {
     step "Downloading AI models"
 
     # Main LLM
-    if ollama list 2>/dev/null | grep -q "^${MODEL%:*}"; then
+    if has_model "$MODEL"; then
         ok "Model $MODEL already exists"
     else
         info "Downloading $MODEL ($MODEL_SIZE) — this may take a few minutes..."
@@ -457,7 +465,7 @@ download_models() {
 
     # Embedding model for RAG
     if [[ "$INSTALL_RAG" == "true" ]]; then
-        if ollama list 2>/dev/null | grep -q "^nomic-embed-text"; then
+        if has_model nomic-embed-text; then
             ok "Embedding model nomic-embed-text already exists"
         else
             info "Downloading embedding model: nomic-embed-text (274 MB)..."
