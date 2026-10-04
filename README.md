@@ -181,6 +181,8 @@ tuxaide on
 tuxaide off
 tuxaide status
 tuxaide run "ls /missing-path"
+tuxaide new
+tuxaide history
 tuxaide model llama3.2
 
 tuxaide mode smart
@@ -208,10 +210,29 @@ Settings live in `~/.config/tuxaide/config.json`. Reinstalling keeps your existi
 | `action_menu` | `true` | After an answer, offer to put a command on the prompt or copy it |
 | `failure_hint` | `true` | After a failed command, show the "type ? to ask TuxAide why" hint |
 | `typo_suggest` | `true` | Suggest a fix for mistyped commands (`gti` → `git`) |
+| `followup_window` | `600` | Seconds a conversation stays open for follow-ups (`0` turns them off) |
+| `followup_turns` | `3` | How many previous exchanges are sent with a follow-up |
 
 Smart RAG's Python dependencies (ChromaDB) are installed in TuxAide's own virtualenv at `~/.local/share/tuxaide/venv`, never in your system Python, so no `pip` command is needed. `tuxaide-uninstall` removes it.
 
 ---
+
+## Follow-up questions
+
+TuxAide remembers the conversation for 10 minutes, so you can keep going:
+
+```bash
+$ como listar ficheiros ocultos
+$ e por tamanho?
+$ e ao contrário?
+```
+
+Follow-ups are recognised by how they start ("and…", "what about…", "e…",
+"y…", "et…", "und…") or by short phrases pointing back ("does that work on
+mac?"). A brand-new question is sent on its own, so unrelated answers don't mix.
+
+- `tuxaide new` — start over
+- `tuxaide history` — your recent questions
 
 ## Explain the last error with `?`
 

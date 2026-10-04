@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """TuxAide v2.1 — Local AI assistant for Linux terminal with Smart RAG."""
 import sys, os, re, json, hashlib, time, urllib.request, urllib.error
-import textwrap, shutil, threading, itertools, subprocess, base64, select, shlex
+import textwrap, shutil, threading, itertools, subprocess, base64, select, shlex, tempfile
 
 CFG_FILE  = os.path.expanduser("~/.config/tuxaide/config.json")
 CACHE_DIR = os.path.expanduser("~/.config/tuxaide/cache")
@@ -9,6 +9,7 @@ LOG_DIR   = os.path.expanduser("~/.config/tuxaide/logs")
 PERF_LOG  = os.path.join(LOG_DIR, "perf.log")
 SESSION_FILE = os.path.expanduser("~/.config/tuxaide/session.json")
 PENDING_DIR  = os.path.expanduser("~/.config/tuxaide/pending")
+HISTORY_FILE = os.path.expanduser("~/.config/tuxaide/history.json")
 
 DEFAULTS = {
     "ollama_url":   "http://localhost:11434",
@@ -29,6 +30,8 @@ DEFAULTS = {
     "action_menu":  True,     # after an answer: put a command on the prompt / copy it
     "failure_hint": True,     # after a failed command, hint that `?` explains it
     "typo_suggest": True,     # "Did you mean: git status?" for mistyped commands
+    "followup_window": 600,   # seconds a conversation stays open for follow-ups
+    "followup_turns": 3,      # previous exchanges sent with a follow-up
 }
 
 def _parse_bool(v):
@@ -193,6 +196,7 @@ class ContextIntentDetector:
         "error", "failed", "fail", "issue", "problem", "erro", "falhou",
         "falha", "problema", "erroro", "erreur", "fehler"
     }
+    WHY_TERMS = {"why", "porque", "porquê", "pourquoi", "warum", "wieso", "perché", "qué"}
 
     @staticmethod
     def _tokens(text):
@@ -211,7 +215,10 @@ class ContextIntentDetector:
         short_phrase = len(tokens) <= 10
         has_deictic = any(tok in cls.DEICTIC_TERMS for tok in tokens)
         has_error_word = any(tok in cls.ERROR_TERMS for tok in tokens)
-        return short_phrase and (has_deictic or has_error_word)
+        has_why = any(tok in cls.WHY_TERMS for tok in tokens)
+        # A pronoun alone ("and reverse it") is a follow-up to the conversation,
+        # not a question about the last command's error.
+        return short_phrase and (has_error_word or (has_deictic and has_why))
 
     @classmethod
     def should_explain_last(cls, text, session_capture_enabled, has_last_run):
@@ -368,8 +375,70 @@ def explain_last_command(c, cmd, rc, user_q=""):
         effective_q += f"\n(Note: when re-run just now it exited with {rerun_rc}.)\n"
 
     spinner = Spinner().start()
-    _, ok, _, commands = answer_streaming(effective_q, c, None, "llm", spinner)
+    answer, ok, _, commands = answer_streaming(effective_q, c, None, "llm", spinner)
+    if ok:   # so "and how do I fix it?" can follow
+        save_turn(f"{user_q or default_why_question()}\n(about the command: {cmd}, exit code {rc})", answer)
     action_menu(commands, c)
+
+# ── Follow-up questions ("e por tamanho?") ────────────────────────────
+# The last few exchanges are kept in history.json. A question that reads like
+# a follow-up, asked while the conversation is still open, is sent with them.
+FOLLOWUP_START = re.compile(
+    r"^(and|or|also|then|what about|how about|what if|instead|"
+    r"e|ou|então|entao|e se|e para|e com|e como|e no|e na|"
+    r"y|y si|y para|y con|"            # not "o": "o que é..." starts new questions
+    r"et|et si|et pour|"
+    r"und|oder|und wenn|und für|"
+    r"e per)\b", re.I)
+HISTORY_KEEP = 20
+ANSWER_KEEP  = 600   # characters of each answer kept as context
+
+def looks_like_followup(text):
+    t = text.strip().lower()
+    if not t:
+        return False
+    if FOLLOWUP_START.match(t):
+        return True
+    tokens = ContextIntentDetector._tokens(t)
+    return len(tokens) <= 8 and any(tok in ContextIntentDetector.DEICTIC_TERMS for tok in tokens)
+
+def load_history():
+    try:
+        with open(HISTORY_FILE) as f:
+            entries = json.load(f)
+        return entries if isinstance(entries, list) else []
+    except Exception:
+        return []
+
+def recent_turns(c):
+    """Exchanges of the conversation still open (the last one less than
+    followup_window seconds ago, and each within that of the next)."""
+    window = c.get("followup_window", 600)
+    entries, turns, t_next = load_history(), [], time.time()
+    for e in reversed(entries):
+        if not window or t_next - e.get("t", 0) > window:
+            break
+        turns.append(e)
+        t_next = e.get("t", 0)
+        if len(turns) >= c.get("followup_turns", 3):
+            break
+    return list(reversed(turns))
+
+def save_turn(question, answer):
+    entries = load_history()
+    entries.append({"t": time.time(), "q": question, "a": answer[:ANSWER_KEEP]})
+    os.makedirs(os.path.dirname(HISTORY_FILE), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(HISTORY_FILE), prefix="history.")  # mode 0600
+    with os.fdopen(fd, "w") as f:
+        json.dump(entries[-HISTORY_KEEP:], f)
+    os.replace(tmp, HISTORY_FILE)
+
+def history_messages(turns):
+    msgs = []
+    for e in turns:
+        msgs.append({"role": "user", "content": e.get("q", "")})
+        msgs.append({"role": "assistant", "content": e.get("a", "")})
+    return msgs
 
 def default_context_query():
     return "Explain the last shell command output and error in simple terms. Identify cause and suggest next step."
@@ -581,12 +650,13 @@ def build_prompt(passages=None):
 class OllamaError(Exception):
     pass
 
-def stream_ollama(q, c, passages=None):
+def stream_ollama(q, c, passages=None, history=None):
     """Yield answer text chunks as Ollama generates them. Raises OllamaError."""
     pay = {
         "model": c["model"],
         "messages": [
             {"role": "system", "content": build_prompt(passages)},
+            *(history or []),
             {"role": "user",   "content": q + (
                 "\n\n[Important: end your answer with exactly: Source: <man page name>]"
                 if passages else ""
@@ -634,8 +704,9 @@ class Renderer:
     Code blocks are buffered until they close so the destructive-command warning
     can be shown above the block that triggered it.
     """
-    def __init__(self, c, mode="llm", out=None, numbered=False):
+    def __init__(self, c, mode="llm", out=None, numbered=False, followup=False):
         self.out   = out or sys.stdout
+        self.followup = followup
         self.numbered = numbered
         self.commands = []     # runnable commands found in shell code blocks
         self.color = c.get("color", True)
@@ -658,10 +729,12 @@ class Renderer:
         self.started = True
         cols, color = self.cols, self.color
         mode_label = " · Smart RAG" if self.mode == "smart" else (" · RAG" if self.mode == "deep" else "")
+        if self.followup:
+            mode_label += " · follow-up"
         self._w()
         self._w(f"{C.Y}{C.B}╭{'─'*(cols-2)}╮{C.Z}" if color else f"┌{'─'*(cols-2)}┐")
         self._w(f"{C.Y}{C.B}╞═ 🐧 TuxAide {C.D}(Ollama · {self.model}{mode_label}){C.Z}{C.Y}{C.B} ═╡{C.Z}"
-                if color else "╞═ TuxAide ═╡")
+                if color else f"╞═ TuxAide (Ollama · {self.model}{mode_label}) ═╡")
 
     def feed(self, chunk):
         self.header()
@@ -764,13 +837,13 @@ def render_text(text, c, mode="llm"):
     r.finish()
     return r.commands
 
-def answer_streaming(q, c, passages, mode, spinner):
+def answer_streaming(q, c, passages, mode, spinner, history=None):
     """Stream the answer to the terminal. Returns (answer, ok, ttft, commands)."""
-    r = Renderer(c, mode, numbered=menu_enabled(c))
+    r = Renderer(c, mode, numbered=menu_enabled(c), followup=bool(history))
     parts, ttft, ok = [], None, True
     t0 = time.time()
     try:
-        for chunk in stream_ollama(q, c, passages):
+        for chunk in stream_ollama(q, c, passages, history):
             if ttft is None:
                 ttft = time.time() - t0
                 spinner.stop()
@@ -1066,7 +1139,8 @@ def main():
     # TUXAIDE_NAMES carries the shell's aliases, functions and builtins.
     if mode_arg == "--not-found":
         line = " ".join(sys.argv[2:])
-        if not is_q(line):
+        # "and by size" isn't a question on its own, but is right after one.
+        if not is_q(line) and not (looks_like_followup(line) and recent_turns(cfg())):
             if suggest_main(line, os.environ.get("TUXAIDE_NAMES", "").split()) == 0:
                 mark_pending("suggested")
                 sys.exit(3)
@@ -1154,6 +1228,26 @@ def main():
         subprocess.run(["tuxaide-index", "--all"])
         return
 
+    # new: forget the conversation (follow-ups start from scratch)
+    if mode_arg == "new":
+        try:
+            os.remove(HISTORY_FILE)
+        except FileNotFoundError:
+            pass
+        print("🐧 New conversation.")
+        return
+
+    # history: the last questions asked
+    if mode_arg == "history":
+        entries = load_history()
+        if not entries:
+            print("No questions yet.")
+            return
+        for e in entries:
+            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(e.get("t", 0)))
+            print(f"  {C.D}{when}{C.Z}  {e.get('q', '').splitlines()[0] if e.get('q') else ''}")
+        return
+
     # timing: show last N lines of perf log
     if mode_arg == "--timing":
         try:
@@ -1196,6 +1290,10 @@ def main():
     if context_query and last_run:
         effective_q = build_contextual_question(q, last_run)
 
+    # A follow-up in an open conversation is sent with the previous exchanges.
+    turns = [] if context_query or not looks_like_followup(q) else recent_turns(c)
+    history = history_messages(turns)
+
     norm_q    = normalize(effective_q if context_query else q)
     ans_key   = answer_cache_key(norm_q, c)
     t_embed   = 0.0
@@ -1203,12 +1301,13 @@ def main():
     t_llm     = 0.0
 
     # ── Answer cache lookup ───────────────────────────────────────────
-    cached_answer = None if context_query else cache_get(
+    cached_answer = None if context_query or history else cache_get(
         "answers", ans_key, c.get("cache_ttl_days", 30))
     if cached_answer and cached_answer.get("answer"):
         answer    = cached_answer["answer"]
         act_mode  = cached_answer.get("mode", "llm")
         perf_log(norm_q, act_mode + "+cache", 0, 0, 0, True)
+        save_turn(q, answer)
         action_menu(render_text(answer, c, act_mode), c)
         return
 
@@ -1257,12 +1356,14 @@ def main():
     # ── LLM call, streamed straight to the terminal ───────────────────
     t_llm_start = time.time()
     answer, ok, ttft, commands = answer_streaming(
-        effective_q, c, passages if passages else None, act_mode, spinner)
+        effective_q, c, passages if passages else None, act_mode, spinner, history)
     t_llm = time.time() - t_llm_start
 
-    # ── Cache the answer (never errors or partial answers) ────────────
-    if ok and not context_query:
+    # ── Cache the answer (never errors, partial answers or follow-ups) ─
+    if ok and not context_query and not history:
         cache_set("answers", ans_key, {"answer": answer, "mode": act_mode})
+    if ok:
+        save_turn(q, answer)
 
     perf_log(norm_q, act_mode, t_embed, t_rag, t_llm, False, ttft)
 

@@ -16,7 +16,7 @@ you tested.
 - `?` re-runs your last command to read its error. Only read-only commands (a
   fixed list in `agent.py`, without redirections or pipes) run without asking;
   anything else needs you to press `y`.
-- Data stays in `~/.config/tuxaide/` (config, answer cache, `session.json`,
+- Data stays in `~/.config/tuxaide/` (config, answer cache, `session.json`, `history.json`,
   performance log) and, for Smart RAG, `~/.local/share/tuxaide/venv`.
   `session.json` can hold command output, so it is created readable by you only.
 - Questions go to the Ollama server set in `ollama_url` (by default
