@@ -1,355 +1,102 @@
 # 🐧 TuxAide
 
 > **Stop searching. Just ask your terminal.**
-> No trigger word. No cloud by default. No command execution by TuxAide. Just ask your terminal in plain English.
+> Type a Linux question as if it were a command and get the answer right there — from a model running on your own computer.
 
 <div align="center">
 
 [![CI](https://github.com/deltaxmodules/tuxaide/actions/workflows/ci.yml/badge.svg)](https://github.com/deltaxmodules/tuxaide/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-2.3.0-informational)](https://github.com/deltaxmodules/tuxaide/releases)
+[![Version](https://img.shields.io/badge/version-2.3.0-informational)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Ollama](https://img.shields.io/badge/Powered%20by-Ollama-blue)](https://ollama.com)
-[![Shell: bash/zsh](https://img.shields.io/badge/Shell-bash%20%7C%20zsh-lightgrey)](#compatibility)
-[![Privacy: 100% local](https://img.shields.io/badge/Privacy-100%25%20local-brightgreen)](#data-sovereignty)
+[![Shell: bash/zsh](https://img.shields.io/badge/Shell-bash%20%7C%20zsh-lightgrey)](#requirements)
+[![Privacy: local by default](https://img.shields.io/badge/Privacy-local%20by%20default-brightgreen)](#privacy-what-is-kept-and-where)
+
+![TuxAide: a question typed in the terminal, the answer streaming in, its command put on the prompt, then a failed command explained by ?](site/public/img/tuxaide-demo.gif)
+
+**[Manual](https://deltaxmodules.github.io/tuxaide/)** · [Demo video](https://deltaxmodules.github.io/tuxaide/#see-it-in-90-seconds) · [Changelog](CHANGELOG.md)
 
 </div>
 
----
-
-## ⚡ Example
-
 ```bash
 $ how do I list hidden files sorted by size
 ```
-
-→ instantly returns:
-
-```bash
-ls -laSh
-```
-
-No browser. No copy/paste. No remembering flags.
-
----
-
-## 🚀 Install
-
-**One command** (Linux and macOS) — installs Ollama, picks the model that fits your RAM, and sets up your shell:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/deltaxmodules/tuxaide/main/setup.sh | bash
-```
-
-Before changing anything it shows what it will do (packages, `sudo`, files, download size)
-and asks once. Files come from the tagged release and are checked against its `SHA256SUMS`.
-Options: `… | bash -s -- --yes` (no questions), `--no-rag`, `--model <name>`.
-
-**With your package manager**, then run `tuxaide setup` once (model, Smart RAG, shell):
-
-| | |
-| --- | --- |
-| Homebrew (macOS, Linux) | `brew install deltaxmodules/tap/tuxaide` |
-| Arch (AUR) | `yay -S tuxaide` |
-| pipx (any system with Python) | `pipx install tuxaide` — with Smart RAG: `pipx install 'tuxaide[rag]'` |
-
-Open a new terminal (or `source ~/.zshrc` / `source ~/.bashrc`) and start typing questions.
-
-**Uninstall:** `tuxaide uninstall` removes only the lines TuxAide added to your shell rc
-(a backup is kept next to it), plus its settings and data; then remove the package if you used one.
-
-Start typing questions directly in your terminal.
-
----
-
-## How it works
-
-Write your Linux question directly in the terminal, as if it were a command:
-
-```bash
-$ how do I list hidden files sorted by size
-```
-
-TuxAide intercepts it silently and answers inline:
 
 ```
 ╭──────────────────────────────────────────────────────────────╮
 ╞═ 🐧 TuxAide (Ollama · qwen2.5-coder:7b · Smart RAG) ═╡
-
   To list hidden files sorted by size:
 
-  ┄ shell ┄
-  ls -laSh
-  ┄┄┄┄┄┄┄
-
-  -a shows hidden files, -S sorts by size (largest first),
-  -h shows human-readable sizes (KB, MB, GB).
-  To reverse: ls -laShr
-
-  Source: man ls(1)
-
-╰──────────────────────────────────────────────────────────────╯
-```
-
-Normal commands (`ls -la`, `git commit`, `sudo apt update`) pass through untouched. **Zero interference.**
-
-### Put the command on your prompt
-
-Commands in the answer are numbered. Press a number and TuxAide puts that command on your prompt, ready to edit — it still never runs anything:
-
-```
   ┄ shell ┄
   [1] ls -laSh
   [2] ls -laShr
   ┄┄┄┄┄┄┄┄┄
 
+  -a shows hidden files, -S sorts by size (largest first), -h shows
+  human-readable sizes. Add -r to reverse the order.
+
+  Source: man ls(1)
+╰──────────────────────────────────────────────────────────────╯
   1-2 put on prompt · c copy · Enter skip
 ```
 
-- **zsh**: the command appears on your prompt.
-- **bash**: press **↑** to bring it up (bash can't pre-fill the prompt).
-- **c** copies it instead (`pbcopy`, `wl-copy`, `xclip`, `xsel`, or OSC 52 over SSH).
-- Destructive commands ask for confirmation first. Turn the menu off with `"action_menu": false`.
+- **No trigger word.** Just type the question. Real commands (`ls -la`, `git commit`) run as always.
+- **It never runs anything on its own.** Press `1` and the command lands on your prompt, ready to edit; you press Enter.
+- **Local by default.** A model on your machine through [Ollama](https://ollama.com). No account, no API key.
+- **`?` explains the last error**, typos get fixed (`gti status` → `git status`), follow-ups work (“and by size?”), and answers fit your system (`dnf` on Fedora, `brew` on macOS).
+- **Any language**: `como listar ficheiros ocultos`, `comment voir l'espace disque`, `wie zeige ich offene Ports`.
 
 ---
 
-## Why TuxAide
+## Install
 
-**1. Built for people learning Linux.**
-No remembering flags. No searching docs. Just ask.
+**One command** (Linux and macOS). It installs Ollama, picks the model that fits your RAM and sets up your shell:
 
-**2. No trigger word needed.**
-You don’t type `ask`, `hey` or anything else. Just write your question — TuxAide hooks into the shell and responds.
+```bash
+curl -fsSL https://raw.githubusercontent.com/deltaxmodules/tuxaide/main/setup.sh | bash
+```
 
-**3. It only explains. Never executes.**
-Safer by design. You stay in control of what runs on your system.
+Before changing anything it lists what it will do — packages, `sudo`, files, download size — and asks once.
+Files come from the tagged release and are checked against its `SHA256SUMS`.
+Options: `… | bash -s -- --yes` (no questions), `--no-rag`, `--model <name>`.
 
-**4. 100% local by default.**
-No API key. No account. No cloud. Nothing leaves your machine — unless you
-explicitly choose a [remote backend](#remote-backends-optional), and then every
-answer is marked **☁ remote**.
+**Or with your package manager**, then run `tuxaide setup` once (model, Smart RAG, shell):
 
-**5. One command installs everything.**
-Ollama, model, shell hook — all in one command.
+| | |
+| --- | --- |
+| Homebrew (macOS, Linux) | `brew install deltaxmodules/tap/tuxaide` |
+| Arch Linux (AUR) | `yay -S tuxaide` |
+| pipx (any system with Python 3.9+) | `pipx install tuxaide` — with Smart RAG: `pipx install 'tuxaide[rag]'` |
 
-**6. Smart RAG — fast when simple, precise when needed.**
-Simple questions → fast LLM answers
-Command-specific → local documentation (man pages)
+Then open a new terminal and type a question. Something off? Run **`tuxaide doctor`**: it checks
+everything and gives the command that fixes each problem.
+
+**Uninstall:** `tuxaide uninstall` removes only the lines TuxAide added to your shell rc
+(keeping a backup) and its own files; remove the package afterwards if you used one.
 
 ---
 
-## Response speed
+## How does it know it's a question?
 
-| Question type      | Example                          | Speed        |
-| ------------------ | -------------------------------- | ------------ |
-| Repeated question  | any question asked before        | < 1s (cache) |
-| Simple / general   | "how do I create a folder"       | 3–5s         |
-| Command-specific   | "rsync options to exclude files" | 8–15s        |
-| Deep documentation | `tuxaide mode deep`              | 15–25s       |
+1. TuxAide only looks at a line when the shell can't find its first word as a command — so `ls`, `git`, your aliases and functions are never touched.
+2. Then the line is a question if it has a question word (*how, what, why, como, porque, comment, wie, cómo…*) or ends with `?`. Anything else gets a typo suggestion or the normal “command not found”.
+3. Right after a question, a short follow-up counts too (“and by size”, “e ao contrário”).
 
----
-
-## Any language
-
-```bash
-how do I check open ports
-como listar ficheiros ocultos
-comment lister les fichiers cachés
-cómo ver el espacio en disco
-wie zeige ich offene Ports
-```
-
-TuxAide automatically replies in your language.
+To **force** a question that starts with a real command — `find big files?` would run `find` — prefix it:
+`tuxaide find big files`. To **stop** TuxAide answering: `tuxaide off` (remembered in new terminals; `tuxaide on` to resume).
 
 ---
 
-## Examples
+## What it does
 
-```bash
-how do I backup with rsync
-why is my process consuming so much RAM
-what is the difference between chmod and chown
-how to configure cron to run at 3am
-how to see who is connected via SSH
-how to create a sudo user on Ubuntu
-what does the -z flag do in grep
-```
+### Put the command on your prompt
 
----
+Commands in an answer are numbered. Press the number: in **zsh** it appears on your prompt; in **bash**
+press **↑** to bring it up (bash can't pre-fill the prompt). **c** copies it instead (also over SSH,
+through OSC 52). Destructive commands (`rm -rf`, `dd`, `mkfs`…) carry a warning and ask before going
+on the prompt.
 
-## Destructive command warnings
-
-```
-⚠ WARNING: This command is destructive and irreversible. Verify carefully before running.
-
-rm -rf /old-data/
-```
-
----
-
-## Controls
-
-```bash
-tuxaide on
-tuxaide off
-tuxaide status
-tuxaide run "ls /missing-path"
-tuxaide new
-tuxaide history
-tuxaide system
-tuxaide model              # list installed models
-tuxaide model llama3.2     # switch (offers to download it)
-tuxaide config             # show settings
-tuxaide config set typo_suggest false
-tuxaide doctor
-tuxaide update
-tuxaide cache clear
-tuxaide --version
-
-tuxaide mode smart
-tuxaide mode deep
-tuxaide mode llm
-
-tuxaide --timing
-tuxaide reindex
-tuxaide index nginx
-
-tuxaide setup              # model, Smart RAG and shell, again
-tuxaide uninstall
-```
-
-`tuxaide on` / `tuxaide off` are remembered across new terminals.
-
-### Configuration
-
-Settings live in `~/.config/tuxaide/config.json`. Reinstalling or updating keeps your existing values.
-Change them with `tuxaide config set <key> <value>` (values are checked, and the change applies
-in the current terminal too) or `tuxaide config reset <key>`; `tuxaide config` lists them all.
-
-| Key | Default | Meaning |
-| --- | --- | --- |
-| `prewarm` | `once` (`off` below 8 GB RAM) | Load the model when a shell opens: `off`, `once` (at most every 10 min), `always` |
-| `keep_alive` | `10m` | How long Ollama keeps the model in memory after a question |
-| `cache_ttl_days` | `30` | Cached answers older than this are ignored |
-| `action_menu` | `true` | After an answer, offer to put a command on the prompt or copy it |
-| `failure_hint` | `true` | After a failed command, show the "type ? to ask TuxAide why" hint |
-| `typo_suggest` | `true` | Suggest a fix for mistyped commands (`gti` → `git`) |
-| `followup_window` | `600` | Seconds a conversation stays open for follow-ups (`0` turns them off) |
-| `followup_turns` | `3` | How many previous exchanges are sent with a follow-up |
-| `system_context` | `true` | Tell the model your OS, package manager, shell and init system |
-| `backend` | `ollama` | `ollama`, or `openai` for an OpenAI-compatible API ([remote backends](#remote-backends-optional)) |
-| `ollama_url` | `http://localhost:11434` | Where Ollama runs |
-| `api_base` | — | Backend `openai`: the API address, e.g. `http://localhost:1234/v1` |
-| `api_key_env` | `OPENAI_API_KEY` | Backend `openai`: the environment variable that holds the API key |
-
-Smart RAG's Python dependencies (ChromaDB) are installed in TuxAide's own virtualenv at `~/.local/share/tuxaide/venv`, never in your system Python, so no `pip` command is needed. `tuxaide uninstall` removes it. With Homebrew or the AUR,
-`tuxaide setup --rag` creates that virtualenv and TuxAide uses it automatically; man pages are
-indexed in the background (`tuxaide doctor` shows the progress).
-
----
-
-## Something not working? `tuxaide doctor`
-
-```
-$ tuxaide doctor
-🐧 TuxAide 2.3.0 — doctor
-   Ubuntu 24.04 LTS x86_64 · Python 3.12.3 · shell bash
-
-  ✓ Settings: ~/.config/tuxaide/config.json
-  ✗ Ollama isn't answering at http://localhost:11434
-    → sudo systemctl start ollama
-  · Mode LLM: the man-page knowledge base isn't used
-  ✓ Hook in ~/.bashrc
-  ✓ TuxAide answers unknown commands in this shell
-
-1 problem(s), 0 warning(s). Run the commands after → to fix them.
-```
-
-It checks Ollama, the model, the embedding model and ChromaDB (in Smart/Deep mode),
-the man-page index, the hook in your shell (and whether another command-not-found
-handler, like oh-my-zsh's, took its place), your `PATH` and free memory. Every
-problem comes with the command that fixes it, for your system. It exits with 1 when
-something is broken, so it works in scripts too. Please paste its output in bug reports.
-
-## Updating
-
-```bash
-tuxaide update --check    # is there a newer release?
-tuxaide update            # download it, keeping settings, history and cache
-```
-
-TuxAide only contacts GitHub when you run `tuxaide update` — it never checks for
-updates on its own. The new files are downloaded and checked before anything is
-replaced, and the new hook is loaded into the current terminal.
-
-## Remote backends (optional)
-
-TuxAide is local by default and stays that way unless you change it. If your
-machine is too small for a local model, or you already run a model server, you
-can point TuxAide at it. Whenever questions leave your computer, every answer
-says so — `☁ remote · <host>` in the answer header, `☁ Asking <host>` while it
-waits — and `tuxaide status` and `tuxaide doctor` warn about it.
-
-**Ollama on another computer in your network**
-
-```bash
-# on the other computer: OLLAMA_HOST=0.0.0.0 ollama serve
-tuxaide config set ollama_url http://192.168.1.10:11434
-tuxaide model              # pick one of its models
-```
-
-**Any OpenAI-compatible API** — LM Studio, llama.cpp server, vLLM, or a cloud service:
-
-```bash
-tuxaide config set backend openai
-tuxaide config set api_base http://localhost:1234/v1     # LM Studio on this machine: stays local
-tuxaide model                                           # the models the API offers
-```
-
-For a service that needs a key, put it in an environment variable in your shell
-rc — TuxAide reads it from there and never writes it to any file:
-
-```bash
-echo 'export OPENAI_API_KEY=sk-…' >> ~/.zshrc
-tuxaide config set api_key_env MY_KEY_VAR   # if your variable has another name
-```
-
-Back to fully local: `tuxaide config reset backend` and `tuxaide config reset ollama_url`.
-Smart RAG needs a local Ollama for its embeddings; with the `openai` backend it
-still uses `ollama_url` for them.
-
-## Answers for your system
-
-TuxAide tells the model which system it's answering for, so you get `dnf` on
-Fedora, `pacman` on Arch and `brew` on macOS instead of "it depends on your
-distro". Only generic facts are sent — never user names, host names or paths:
-
-```bash
-$ tuxaide system
-🐧 Sent with each question: Ubuntu 24.04 LTS, package manager apt, shell bash, init systemd, x86_64
-```
-
-Turn it off with `tuxaide --set system_context false`.
-
-## Follow-up questions
-
-TuxAide remembers the conversation for 10 minutes, so you can keep going:
-
-```bash
-$ como listar ficheiros ocultos
-$ e por tamanho?
-$ e ao contrário?
-```
-
-Follow-ups are recognised by how they start ("and…", "what about…", "e…",
-"y…", "et…", "und…") or by short phrases pointing back ("does that work on
-mac?"). A brand-new question is sent on its own, so unrelated answers don't mix.
-
-- `tuxaide new` — start over
-- `tuxaide history` — your recent questions
-
-## Explain the last error with `?`
-
-When a command fails, TuxAide shows a one-line hint. Type `?` to find out why:
+### `?` explains the last error
 
 ```
 $ ls /var/log/nginx
@@ -358,17 +105,11 @@ ls: /var/log/nginx: No such file or directory
 $ ?
 ```
 
-- `? <question>` asks something specific about the last command.
-- Asking in words works too, right after the failure: `porque deu este erro?`
-- TuxAide remembers only the last command line and its exit code, never its output.
-  To read the error it re-runs the command: read-only commands (`ls`, `cat`, `grep`,
-  `git status`, `systemctl status`, …) are re-run straight away, anything else only
-  after you answer **y**. Interactive programs (`vim`, `top`, …) are never re-run.
-- Turn the hint off with `"failure_hint": false`; `?` keeps working.
+`? <question>` asks something specific; asking in words (“why did this fail?”) works too.
+TuxAide remembers only the last command line and its exit code — never its output. To read the
+error it re-runs the command: read-only commands straight away, anything else only after you answer **y**.
 
 ### Typos
-
-Mistype a command and TuxAide suggests the fix instantly, without asking the model:
 
 ```
 $ gti status
@@ -376,61 +117,101 @@ zsh: command not found: gti
 🐧 Did you mean: git status  [Enter/y] put on prompt · other key skips
 ```
 
-It knows the commands on your `PATH` plus your own aliases and functions, and
-catches a missing space too (`cd..` → `cd ..`, `ls-la` → `ls -la`,
-`git-log` → `git log`). On Debian/Ubuntu, a command that isn't installed shows
-which package provides it. Turn it off with `"typo_suggest": false`.
+Instant, without the model: it knows your `PATH`, aliases and functions, and fixes missing spaces
+(`cd..`, `ls-la`). Your shell's own handler (Ubuntu's “install it with apt”, oh-my-zsh's) still answers
+for commands TuxAide has nothing to say about.
 
-### Full output capture with `tuxaide run`
+### Follow-ups and history
 
-To give TuxAide the complete output of a command up front:
+The conversation stays open for 10 minutes: `como listar ficheiros ocultos` → `e por tamanho?` →
+`e ao contrário?`. `tuxaide new` starts over; `tuxaide history` lists your recent questions.
+
+### Smart RAG: answers from your man pages
+
+With Smart RAG on, questions about a specific command are answered from the man pages installed on
+*your* system, with the source cited (`Source: man rsync(1)`). Man pages are indexed in the background
+after install; general questions skip it and stay fast. `tuxaide mode llm|smart|deep` switches.
+
+### Answers for your system
+
+The model is told your OS, package manager, shell and init system — never user names, host names or
+paths — so you get `dnf` on Fedora and `brew` on macOS. See exactly what is sent with `tuxaide system`.
+
+### Remote backends (optional)
+
+Local is the default and stays that way unless you change it. On a small machine, or with a model
+server you already run, point TuxAide at Ollama on another computer
+(`tuxaide config set ollama_url http://192.168.1.10:11434`) or any OpenAI-compatible API — LM Studio,
+llama.cpp server, vLLM, a cloud service (`tuxaide config set backend openai`,
+`tuxaide config set api_base …`). Whenever a question leaves your computer, the answer is marked
+**☁ remote · host**, and `status` and `doctor` say so. API keys are read from an environment variable
+(`OPENAI_API_KEY`, or the name in `api_key_env`) and never written to any file.
+
+---
+
+## Commands
 
 ```bash
-tuxaide run "ls /naoexiste"
-tuxaide "porque deu este erro?"
+tuxaide <question>           # ask (or just type the question)
+?  [question]                # explain the last command that failed
+tuxaide new | history        # new conversation · recent questions
+tuxaide on | off | status
+tuxaide doctor               # check everything, with fixes
+tuxaide setup                # model, Smart RAG and shell (after a package install)
+tuxaide config [get|set|reset] <key> [value]
+tuxaide model [name]         # list models · switch (offers to download it)
+tuxaide mode llm|smart|deep
+tuxaide system               # what is sent about this machine
+tuxaide run <cmd>            # run a command and keep its output for the next question
+tuxaide index <cmd> | reindex
+tuxaide cache [clear]
+tuxaide update [--check]     # only contacts GitHub when you run it
+tuxaide uninstall
+tuxaide --version | --timing
 ```
 
-### Capture behavior
-
-- `session_capture` is enabled by default (`true`)
-- session file: `~/.config/tuxaide/session.json`
-- output is truncated predictably:
-  - max 500 lines
-  - head 50 + tail 50
-  - keep keyword lines: `error`, `warn`, `fatal`, `failed`, `denied`
-
-### Privacy
-
-- all captured context stays on your machine (with a remote backend, the question
-  and the context it needs are sent to that backend, marked ☁)
-- no cloud sync
-- no external telemetry
+All settings, with what they do: [the manual](https://deltaxmodules.github.io/tuxaide/reference/settings).
 
 ---
 
-## 🔒 Data Sovereignty
+## How it compares
 
-* Fully local processing via Ollama (by default)
-* No external calls unless you configure a remote backend — and then every answer shows ☁
-* No tracking
-* Works offline after install
-* Designed for data-sovereign and offline environments
+| | TuxAide | [tldr](https://github.com/tldr-pages/tldr) | [ShellGPT](https://github.com/TheR1D/shell_gpt) | [GitHub Copilot CLI](https://github.com/github/copilot-cli) |
+| --- | --- | --- | --- | --- |
+| Ask without a command word | Yes — type the question | No — `tldr tar` | No — `sgpt "…"` | No — `copilot` |
+| Works offline | Yes — local model by default | Yes — clients cache the pages | With a local backend (Ollama); “not optimized for local models” | No |
+| Explains errors | Yes — `?` | No | Yes — chat / REPL | Yes — agent |
+| Runs commands | Never on its own: you press Enter | No | After you choose **[E]xecute** | After your approval (or in autopilot mode) |
+| Needs an account or key | No | No | An OpenAI API key by default | A Copilot subscription |
+
+Checked on 2026-10-04 against each project's page (linked). tldr is great for examples of one command;
+ShellGPT and Copilot CLI are general assistants that can act for you. TuxAide sits in between:
+it answers inside your shell, from a local model, and leaves the running to you.
 
 ---
 
-## Compatibility
+## Privacy: what is kept and where
 
-| Platform           | Support |
-| ------------------ | ------- |
-| Ubuntu / Debian    | ✅       |
-| Fedora / RHEL      | ✅       |
-| Arch Linux         | ✅       |
-| macOS              | ✅       |
-| ARM / Raspberry Pi | ✅       |
+Everything stays on your computer (unless you set up a [remote backend](#remote-backends-optional)).
+No telemetry. TuxAide only goes online for `tuxaide update` and for downloading models when you ask.
 
-Shells: bash, zsh
+| What | Where | How to delete |
+| --- | --- | --- |
+| Settings | `~/.config/tuxaide/config.json` | `tuxaide config reset <key>` |
+| Your last 20 questions and the start of each answer (for follow-ups) | `~/.config/tuxaide/history.json` (only you can read it) | `tuxaide new` |
+| Cached answers (30 days) | `~/.config/tuxaide/cache/` | `tuxaide cache clear` |
+| Output of `tuxaide run` | `~/.config/tuxaide/session.json` (only you can read it) | `rm ~/.config/tuxaide/session.json` |
+| Timings and the first 80 characters of each question | `~/.config/tuxaide/logs/perf.log` | `rm ~/.config/tuxaide/logs/perf.log` |
+| Man-page index (Smart RAG) | `~/.config/tuxaide/vectordb/` | `tuxaide mode llm`, then delete it |
+| The last command line and its exit code (for `?`) | your shell's memory only | closing the terminal |
 
-The installer picks the model that fits your RAM:
+`tuxaide uninstall` removes all of it.
+
+---
+
+## Requirements
+
+Linux or macOS, **bash 4+ or zsh**, Python 3.9+. The installer picks the model that fits your RAM:
 
 | RAM | Model | Download | Answers |
 | --- | --- | --- | --- |
@@ -439,18 +220,39 @@ The installer picks the model that fits your RAM:
 | 3–5 GB | `qwen2.5:1.5b` | 986 MB | Simpler, but usable |
 | under 3 GB | `qwen2.5:0.5b`, or a [remote backend](#remote-backends-optional) | 398 MB | Basic |
 
-Smart RAG needs 5 GB or more. Switch models any time with `tuxaide model <name>`.
+Smart RAG needs 5 GB or more. Switch models any time with `tuxaide model <name>`. A GPU makes answers
+faster but isn't needed. Tested on Ubuntu, Debian, Fedora, Arch, Alpine and macOS (zsh; macOS's own
+bash 3.2 is too old — use zsh or `brew install bash`).
+
+---
+
+## FAQ
+
+**Does it interfere with my scripts?** No. The hook is only loaded in interactive shells, and it only
+acts on lines whose first word isn't a command. Scripts run exactly as before.
+
+**Does it work over SSH?** Yes, on the machine where it's installed. `c` copies to your local clipboard
+through OSC 52 when your terminal supports it.
+
+**oh-my-zsh and other frameworks?** TuxAide adds itself with `add-zsh-hook`, next to whatever else
+your setup runs, and keeps the command-not-found handler that was there before (such as the one
+oh-my-zsh's plugin defines). Load TuxAide last in your rc file; `tuxaide doctor` checks that nothing
+replaced it. Prompt themes like starship and powerlevel10k haven't been tested yet — reports welcome.
+
+**fish?** Not yet: TuxAide works in bash and zsh.
+
+**Is a question sent anywhere?** Only to the model you configured — the local Ollama by default.
+`tuxaide status` says where answers come from.
+
+**Can it run something dangerous?** It never runs a command on its own. Commands go on your prompt
+for you to read; destructive ones are flagged first. The one exception is `?` re-running your last
+command to read its error — only read-only commands without asking.
 
 ---
 
 ## Contributing
 
-Open source project — contributions welcome. See [CONTRIBUTING.md](CONTRIBUTING.md)
-for how to run the tests (no Ollama needed) and [SECURITY.md](SECURITY.md) to
-report a vulnerability.
+Bug reports, fixes and ideas are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) (the tests need no
+Ollama) and [SECURITY.md](SECURITY.md). When reporting a bug, please paste the output of `tuxaide doctor`.
 
-👉 https://github.com/deltaxmodules/tuxaide
-
-Built with the help of AI tools (Claude, Ollama).
-
----
+[Changelog](CHANGELOG.md) · [MIT License](LICENSE) · Built with the help of AI tools (Claude, Ollama).
