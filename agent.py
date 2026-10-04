@@ -32,6 +32,7 @@ DEFAULTS = {
     "typo_suggest": True,     # "Did you mean: git status?" for mistyped commands
     "followup_window": 600,   # seconds a conversation stays open for follow-ups
     "followup_turns": 3,      # previous exchanges sent with a follow-up
+    "system_context": True,   # tell the model which OS / package manager / shell this is
 }
 
 def _parse_bool(v):
@@ -61,6 +62,7 @@ SETTABLE = {
     "action_menu":     _parse_bool,
     "failure_hint":    _parse_bool,
     "typo_suggest":    _parse_bool,
+    "system_context":  _parse_bool,
 }
 
 def cfg():
@@ -484,8 +486,74 @@ def cache_key(text):
     return hashlib.md5(text.encode()).hexdigest()
 
 def answer_cache_key(norm_q, c):
-    """Answers depend on the model and the configured mode, not just the question."""
-    return cache_key(f"{c.get('model')}|{c.get('mode', 'llm')}|{norm_q}")
+    """Answers depend on the model, the configured mode and the system, not just the question."""
+    return cache_key(f"{c.get('model')}|{c.get('mode', 'llm')}|{system_summary(c)}|{norm_q}")
+
+# ── The user's system, so answers fit it ("dnf" on Fedora, "brew" on macOS)
+# Only generic facts: never user names, host names or paths.
+OS_RELEASE = "/etc/os-release"
+PKG_BY_DISTRO = [   # matched against os-release ID and ID_LIKE
+    ("debian", "apt"), ("ubuntu", "apt"), ("fedora", "dnf"), ("rhel", "dnf"),
+    ("centos", "dnf"), ("arch", "pacman"), ("suse", "zypper"), ("alpine", "apk"),
+    ("gentoo", "emerge"), ("void", "xbps-install"), ("nixos", "nix"),
+]
+PKG_MANAGERS = ["apt", "dnf", "yum", "pacman", "zypper", "apk", "emerge", "xbps-install", "nix", "brew"]
+
+def _os_release():
+    info = {}
+    try:
+        with open(OS_RELEASE) as f:
+            for line in f:
+                k, _, v = line.strip().partition("=")
+                if k:
+                    info[k] = v.strip().strip('"')
+    except OSError:
+        pass
+    return info
+
+def detect_system():
+    """{"os", "pkg", "shell", "init", "arch"} with whatever could be detected."""
+    import platform
+    info = {"arch": platform.machine()}
+    if sys.platform == "darwin":
+        ver = platform.mac_ver()[0]
+        info["os"] = f"macOS {ver}".strip()
+        info["pkg"] = "brew" if shutil.which("brew") else ""
+        info["init"] = "launchd"
+    else:
+        rel = _os_release()
+        info["os"] = rel.get("PRETTY_NAME") or rel.get("NAME") or platform.system()
+        try:
+            with open("/proc/version") as f:
+                if "microsoft" in f.read().lower():
+                    info["os"] += " (WSL)"
+        except OSError:
+            pass
+        ids = f"{rel.get('ID', '')} {rel.get('ID_LIKE', '')}".lower().split()
+        pkg = next((pm for distro, pm in PKG_BY_DISTRO if distro in ids), "")
+        if pkg == "dnf" and not shutil.which("dnf") and shutil.which("yum"):
+            pkg = "yum"
+        info["pkg"] = pkg or next((pm for pm in PKG_MANAGERS if shutil.which(pm)), "")
+        info["init"] = "systemd" if os.path.isdir("/run/systemd/system") else ""
+    shell = os.environ.get("TUXAIDE_SHELL") or os.path.basename(os.environ.get("SHELL", ""))
+    info["shell"] = shell if shell in ("bash", "zsh", "fish", "sh", "dash", "ksh") else ""
+    return info
+
+def system_summary(c):
+    """One line for the prompt, e.g. "Ubuntu 24.04 LTS, package manager apt, shell bash,
+    init systemd, x86_64". Empty when system_context is off."""
+    if not c.get("system_context", True):
+        return ""
+    i = detect_system()
+    parts = [i.get("os", "")]
+    if i.get("pkg"):
+        parts.append(f"package manager {i['pkg']}")
+    if i.get("shell"):
+        parts.append(f"shell {i['shell']}")
+    if i.get("init"):
+        parts.append(f"init {i['init']}")
+    parts.append(i.get("arch", ""))
+    return ", ".join(p for p in parts if p)
 
 def cache_get(kind, key, max_age_days=None):
     """kind: 'answers' or 'embeddings'. Entries older than max_age_days are ignored."""
@@ -613,7 +681,7 @@ def is_destructive(text):
     return False
 
 # ── Prompt builders ───────────────────────────────────────────────────
-def build_prompt(passages=None):
+def build_prompt(passages=None, system=""):
     NL = chr(10)
     base = (
         "You are TuxAide, an assistant specialised EXCLUSIVELY in Linux and Unix systems." + NL +
@@ -641,8 +709,11 @@ def build_prompt(passages=None):
     base += (
         "Answer rules: Be direct — no long introductions, do not repeat the question. "
         "Always show ready-to-use command examples in code blocks. "
-        "If a command differs by distro (Ubuntu vs Arch vs Fedora), say so. "
-        "Maximum 3 paragraphs. Be concise."
+        + (f"The user's system: {system}. Give commands for this system only "
+           "(its package manager, its init system, its tools), unless the user asks about another one. "
+           if system else
+           "If a command differs by distro (Ubuntu vs Arch vs Fedora), say so. ")
+        + "Maximum 3 paragraphs. Be concise."
     )
     return base
 
@@ -655,7 +726,7 @@ def stream_ollama(q, c, passages=None, history=None):
     pay = {
         "model": c["model"],
         "messages": [
-            {"role": "system", "content": build_prompt(passages)},
+            {"role": "system", "content": build_prompt(passages, system_summary(c))},
             *(history or []),
             {"role": "user",   "content": q + (
                 "\n\n[Important: end your answer with exactly: Source: <man page name>]"
@@ -1226,6 +1297,17 @@ def main():
     if mode_arg == "reindex":
         print("🐧 Re-indexing all man pages...")
         subprocess.run(["tuxaide-index", "--all"])
+        return
+
+    # system: what TuxAide tells the model about this machine
+    if mode_arg == "system":
+        c = cfg()
+        summary = system_summary(c)
+        if summary:
+            print(f"🐧 Sent with each question: {summary}")
+            print(f"{C.D}   Turn off with: tuxaide --set system_context false{C.Z}")
+        else:
+            print("🐧 System context is off (tuxaide --set system_context true to enable).")
         return
 
     # new: forget the conversation (follow-ups start from scratch)

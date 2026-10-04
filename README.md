@@ -183,6 +183,7 @@ tuxaide status
 tuxaide run "ls /missing-path"
 tuxaide new
 tuxaide history
+tuxaide system
 tuxaide model llama3.2
 
 tuxaide mode smart
@@ -212,10 +213,24 @@ Settings live in `~/.config/tuxaide/config.json`. Reinstalling keeps your existi
 | `typo_suggest` | `true` | Suggest a fix for mistyped commands (`gti` → `git`) |
 | `followup_window` | `600` | Seconds a conversation stays open for follow-ups (`0` turns them off) |
 | `followup_turns` | `3` | How many previous exchanges are sent with a follow-up |
+| `system_context` | `true` | Tell the model your OS, package manager, shell and init system |
 
 Smart RAG's Python dependencies (ChromaDB) are installed in TuxAide's own virtualenv at `~/.local/share/tuxaide/venv`, never in your system Python, so no `pip` command is needed. `tuxaide-uninstall` removes it.
 
 ---
+
+## Answers for your system
+
+TuxAide tells the model which system it's answering for, so you get `dnf` on
+Fedora, `pacman` on Arch and `brew` on macOS instead of "it depends on your
+distro". Only generic facts are sent — never user names, host names or paths:
+
+```bash
+$ tuxaide system
+🐧 Sent with each question: Ubuntu 24.04 LTS, package manager apt, shell bash, init systemd, x86_64
+```
+
+Turn it off with `tuxaide --set system_context false`.
 
 ## Follow-up questions
 

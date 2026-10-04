@@ -109,6 +109,7 @@ tuxaide() {
         echo "   ?  [question]                 — explain why the last command failed"
         echo "   tuxaide new                   — start a new conversation (forget follow-ups)"
         echo "   tuxaide history               — show your recent questions"
+        echo "   tuxaide system                — show what TuxAide tells the model about this machine"
         echo "   tuxaide on / off              — enable / disable hook"
         echo "   tuxaide status                — show status and mode"
         echo "   tuxaide mode [llm|smart|deep] — switch knowledge mode"
@@ -149,7 +150,7 @@ tuxaide() {
             [[ -z "$m" ]] && { echo "Usage: tuxaide model <name>"; return; }
             "$_LG" --set model "$m" && echo "🐧 Model changed to: $m"
             ;;
-        mode|index|reindex|--timing|new|history) "$_LG" "$@" ;;
+        mode|index|reindex|--timing|new|history|system) "$_LG" "$@" ;;
         *) "$_LG" --ask "$*" ;;
     esac
 }
