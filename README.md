@@ -206,6 +206,7 @@ Settings live in `~/.config/tuxaide/config.json`. Reinstalling keeps your existi
 | `cache_ttl_days` | `30` | Cached answers older than this are ignored |
 | `action_menu` | `true` | After an answer, offer to put a command on the prompt or copy it |
 | `failure_hint` | `true` | After a failed command, show the "type ? to ask TuxAide why" hint |
+| `typo_suggest` | `true` | Suggest a fix for mistyped commands (`gti` → `git`) |
 
 Smart RAG's Python dependencies (ChromaDB) are installed in TuxAide's own virtualenv at `~/.local/share/tuxaide/venv`, never in your system Python, so no `pip` command is needed. `tuxaide-uninstall` removes it.
 
@@ -229,6 +230,21 @@ $ ?
   `git status`, `systemctl status`, …) are re-run straight away, anything else only
   after you answer **y**. Interactive programs (`vim`, `top`, …) are never re-run.
 - Turn the hint off with `"failure_hint": false`; `?` keeps working.
+
+### Typos
+
+Mistype a command and TuxAide suggests the fix instantly, without asking the model:
+
+```
+$ gti status
+zsh: command not found: gti
+🐧 Did you mean: git status  [Enter/y] put on prompt · other key skips
+```
+
+It knows the commands on your `PATH` plus your own aliases and functions, and
+catches a missing space too (`cd..` → `cd ..`, `ls-la` → `ls -la`,
+`git-log` → `git log`). On Debian/Ubuntu, a command that isn't installed shows
+which package provides it. Turn it off with `"typo_suggest": false`.
 
 ### Full output capture with `tuxaide run`
 

@@ -49,11 +49,6 @@ _tux_agent() {
     if [[ -n "${ZSH_VERSION:-}" ]]; then noglob "$_LG" "$@"; else "$_LG" "$@"; fi
 }
 
-_tux_should_handle_question_line() {
-    local line="$*"
-    [[ -z "$line" ]] && return 1
-    _tux_agent --check "$line" >/dev/null 2>&1
-}
 
 _tux_run() {
     local cmd="$*"
@@ -197,6 +192,11 @@ _tux_record() {
     esac
     _TUX_LAST_CMD="$cmd"
     _TUX_LAST_RC="$rc"
+    # A typo that already got a "Did you mean" suggestion needs no 💡 hint too.
+    if [[ -f "${_TUX_PENDING_DIR}/$$.suggested" ]]; then
+        rm -f "${_TUX_PENDING_DIR}/$$.suggested"
+        return
+    fi
     [[ "$_LG_ON" == "true" && "$_TUX_FAILURE_HINT" == "true" ]] || return
     case "$rc" in
         0|130|141|148) ;;   # success, Ctrl+C, broken pipe, Ctrl+Z
@@ -240,13 +240,16 @@ command_not_found_handle() {
     local full_cmd
     full_cmd=$(HISTTIMEFORMAT="" history 1 2>/dev/null | sed 's/^ *[0-9]* *//')
     local question="${full_cmd:-$*}"
-    if _tux_should_handle_question_line "$question"; then
-        mkdir -p "$_TUX_PENDING_DIR" && : > "${_TUX_PENDING_DIR}/$$.asked"
-        # This handler runs in a subshell, so exporting here doesn't leak.
-        export TUXAIDE_LAST_CMD="$_TUX_LAST_CMD" TUXAIDE_LAST_RC="$_TUX_LAST_RC"
-        _tux_agent --ask "$question"
-        return 0
-    fi
+    # One agent call: answers a question, or suggests a fix for a typo
+    # ("gti status" → "git status"), or exits 1 for a plain "not found".
+    # This handler runs in a subshell, so exporting here doesn't leak.
+    export TUXAIDE_LAST_CMD="$_TUX_LAST_CMD" TUXAIDE_LAST_RC="$_TUX_LAST_RC"
+    export TUXAIDE_NAMES="$({ compgen -a; compgen -A function; compgen -b; } 2>/dev/null)"
+    _tux_agent --not-found "$question"
+    case $? in
+        0) return 0 ;;     # answered as a question
+        3) return 127 ;;   # typo: suggestion already printed
+    esac
     echo "bash: $cmd: command not found" >&2
     return 127
 }
@@ -276,13 +279,18 @@ if [[ -n "${ZSH_VERSION:-}" ]]; then
     command_not_found_handler() {
         local cmd="$1"
         local line="$*"
-        if _tux_should_handle_question_line "$line"; then
-            mkdir -p "$_TUX_PENDING_DIR" && : > "${_TUX_PENDING_DIR}/$$.asked"
-            # This handler runs in a subshell, so exporting here doesn't leak.
-            export TUXAIDE_LAST_CMD="$_TUX_LAST_CMD" TUXAIDE_LAST_RC="$_TUX_LAST_RC"
-            noglob "$_LG" --ask "$line"
-            return 0
+        if [[ "$_LG_ON" != "true" ]]; then
+            echo "zsh: command not found: $cmd" >&2
+            return 127
         fi
+        # Same single agent call as in bash (see command_not_found_handle).
+        export TUXAIDE_LAST_CMD="$_TUX_LAST_CMD" TUXAIDE_LAST_RC="$_TUX_LAST_RC"
+        export TUXAIDE_NAMES="${(F)${(k)aliases}} ${(F)${(k)functions}} ${(F)${(k)builtins}}"
+        noglob "$_LG" --not-found "$line"
+        case $? in
+            0) return 0 ;;
+            3) return 127 ;;
+        esac
         echo "zsh: command not found: $cmd" >&2
         return 127
     }

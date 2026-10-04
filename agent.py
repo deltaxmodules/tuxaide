@@ -28,6 +28,7 @@ DEFAULTS = {
     "cache_ttl_days": 30,
     "action_menu":  True,     # after an answer: put a command on the prompt / copy it
     "failure_hint": True,     # after a failed command, hint that `?` explains it
+    "typo_suggest": True,     # "Did you mean: git status?" for mistyped commands
 }
 
 def _parse_bool(v):
@@ -56,6 +57,7 @@ SETTABLE = {
     "prewarm":         _parse_choice("off", "once", "always"),
     "action_menu":     _parse_bool,
     "failure_hint":    _parse_bool,
+    "typo_suggest":    _parse_bool,
 }
 
 def cfg():
@@ -849,6 +851,147 @@ def stage_for_prompt(cmd):
     except OSError:
         return False
 
+def staged_message():
+    if os.environ.get("TUXAIDE_SHELL") == "zsh":
+        return f"{C.G}✓ On your prompt{C.Z}{C.D} — edit it or press Enter to run{C.Z}"
+    return f"{C.G}✓ Press ↑{C.Z}{C.D} to get it on your prompt{C.Z}"
+
+# ── Typo suggestions for unknown commands ("gti status" → "git status") ──
+# No model involved: an edit distance against the commands on PATH plus the
+# shell's aliases, functions and builtins (piped in by the hook).
+def edit_distance(a, b, limit):
+    """Optimal string alignment distance (a swap of two neighbours counts as 1)."""
+    if abs(len(a) - len(b)) > limit:
+        return limit + 1
+    prev2, prev = None, list(range(len(b) + 1))
+    for i in range(1, len(a) + 1):
+        cur = [i] + [0] * len(b)
+        for j in range(1, len(b) + 1):
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] != b[j - 1]))
+            if i > 1 and j > 1 and a[i - 1] == b[j - 2] and a[i - 2] == b[j - 1]:
+                cur[j] = min(cur[j], prev2[j - 2] + 1)
+        prev2, prev = prev, cur
+    return prev[-1]
+
+def path_commands():
+    names = set()
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        try:
+            with os.scandir(d or ".") as it:
+                names.update(e.name for e in it)
+        except OSError:
+            pass
+    return names
+
+def best_command_match(typed, names, common=()):
+    """Closest command name, or None. At most 1 edit for names up to 4 letters, else 2.
+    Ties go to swapped letters ("sl" → "ls"), then well-known commands, then the
+    closest length."""
+    limit = 1 if len(typed) <= 4 else 2
+    best = None
+    for n in names:
+        if n == typed or n.startswith("_") or abs(len(n) - len(typed)) > limit:
+            continue
+        d = edit_distance(typed, n, limit)
+        if d > limit:
+            continue
+        key = (d, sorted(n) != sorted(typed), n not in common, abs(len(n) - len(typed)), n)
+        if best is None or key < best:
+            best = key
+    return best[-1] if best else None
+
+SUBCOMMAND_TOOLS = set(SAFE_SUBCOMMANDS) | {"cargo", "go", "yarn", "dnf", "snap", "flatpak", "ollama"}
+
+def suggest_fix(line, extra_names=()):
+    """Corrected command line for a mistyped first word, or None."""
+    stripped = line.lstrip()
+    if not stripped:
+        return None
+    typed = stripped.split()[0]
+    rest = stripped[len(typed):]
+    if "=" in typed or len(typed) < 2:
+        return None
+    if "/" not in typed and os.path.isfile(typed) and os.access(typed, os.X_OK):
+        return "./" + stripped                      # forgot the ./ for a local script
+    extra = {n for n in extra_names if n and not n.startswith("_")}
+    names = path_commands() | extra
+    if typed in names:
+        return None                                 # exists; failed for another reason
+    # Missing space: "cd.." → "cd ..", "ls-la" → "ls -la", "cd/etc" → "cd /etc",
+    # and a dash for a space: "git-status" → "git status"
+    for k in range(len(typed) - 1, 1, -1):
+        head, tail = typed[:k], typed[k:]
+        if head not in names:
+            continue
+        if head in SUBCOMMAND_TOOLS and re.fullmatch(r"-[a-z][a-z-]*", tail):
+            return f"{head} {tail[1:]}{rest}"        # "git-log" → "git log"
+        if re.fullmatch(r"\.+(/.*)?|[/~].*|-[A-Za-z]{1,3}", tail):
+            return f"{head} {tail}{rest}"
+        if re.fullmatch(r"-[a-z][a-z-]{3,}", tail):
+            return f"{head} {tail[1:]}{rest}"
+    if "/" in typed:
+        return None
+    match = best_command_match(typed, names, CMDS | extra)
+    return match + rest if match else None
+
+def not_found_message(typed):
+    if os.environ.get("TUXAIDE_SHELL") == "zsh":
+        return f"zsh: command not found: {typed}"
+    return f"bash: {typed}: command not found"
+
+def mark_pending(kind):
+    """Tell this shell's prompt hook what the not-found handler did (asked / suggested)."""
+    pid = os.environ.get("TUXAIDE_SHELL_PID", "")
+    if pid.isdigit():
+        try:
+            os.makedirs(PENDING_DIR, exist_ok=True)
+            open(os.path.join(PENDING_DIR, f"{pid}.{kind}"), "w").close()
+        except OSError:
+            pass
+
+def suggest_main(line, extra=()):
+    """Handle an unknown command that isn't a question. 0 if we printed the
+    message ourselves, 1 to let the shell print its usual "command not found"."""
+    c = cfg()
+    if not c.get("typo_suggest", True):
+        return 1
+    fixed = suggest_fix(line, extra)
+    typed = (line.split() or [""])[0]
+    if not fixed:
+        # Ubuntu/Debian: "Command 'htop' not found, but can be installed with: ..."
+        helper = "/usr/lib/command-not-found"
+        if typed and os.path.exists(helper):
+            try:
+                p = subprocess.run([helper, "--", typed], capture_output=True, text=True, timeout=5)
+                msg = (p.stderr or p.stdout).strip()
+                if msg:
+                    print(msg, file=sys.stderr)
+                    return 0
+            except Exception:
+                pass
+        return 1
+
+    print(not_found_message(typed), file=sys.stderr)
+    hint = f"🐧 Did you mean: {C.B}{fixed}{C.Z}"
+    tty = None
+    if sys.stdout.isatty() and not is_destructive(fixed):
+        try:
+            tty = open("/dev/tty", "r+b", buffering=0)
+        except OSError:
+            tty = None
+    if tty is None:
+        print(hint, file=sys.stderr)
+        return 0
+    with tty:
+        try:
+            key = read_key(tty, 10, f"{hint} {C.D}[Enter/y] put on prompt · other key skips{C.Z}".encode())
+        except KeyboardInterrupt:
+            key = ""
+        tty.write(b"\r\033[K"); tty.flush()
+        if key in ("\n", "\r", "y", "Y") and stage_for_prompt(fixed):
+            tty.write(f"{hint}  {staged_message()}\n".encode()); tty.flush()
+    return 0
+
 def action_menu(commands, c, timeout=15):
     if not commands or not menu_enabled(c):
         return
@@ -886,10 +1029,7 @@ def action_menu(commands, c, timeout=15):
                 say(f"{C.D}Skipped.{C.Z}")
                 return
         if stage_for_prompt(cmd):
-            if os.environ.get("TUXAIDE_SHELL") == "zsh":
-                say(f"{C.G}✓ On your prompt{C.Z}{C.D} — edit it or press Enter to run{C.Z}")
-            else:
-                say(f"{C.G}✓ Press ↑{C.Z}{C.D} to get it on your prompt{C.Z}")
+            say(staged_message())
         elif copy_to_clipboard(cmd, tty):
             say(f"{C.G}✓ Copied:{C.Z} {cmd}")
     finally:
@@ -910,6 +1050,21 @@ def main():
     # --check: is this a question?
     if mode_arg == "--check":
         sys.exit(0 if is_q(" ".join(sys.argv[2:])) else 1)
+
+    # --not-found LINE: the shell's command-not-found handler, in one process.
+    # A question is answered (exit 0); otherwise maybe a typo suggestion
+    # (exit 3, message printed); else exit 1 and the shell prints its own.
+    # TUXAIDE_NAMES carries the shell's aliases, functions and builtins.
+    if mode_arg == "--not-found":
+        line = " ".join(sys.argv[2:])
+        if not is_q(line):
+            if suggest_main(line, os.environ.get("TUXAIDE_NAMES", "").split()) == 0:
+                mark_pending("suggested")
+                sys.exit(3)
+            sys.exit(1)
+        mark_pending("asked")
+        sys.argv = [sys.argv[0], "--ask", line]
+        mode_arg = "--ask"
 
     # --set KEY VALUE: persist a config value (used by the shell hook)
     if mode_arg == "--set":
