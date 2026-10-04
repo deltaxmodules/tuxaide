@@ -81,6 +81,24 @@ TuxAide intercepts it silently and answers inline:
 
 Normal commands (`ls -la`, `git commit`, `sudo apt update`) pass through untouched. **Zero interference.**
 
+### Put the command on your prompt
+
+Commands in the answer are numbered. Press a number and TuxAide puts that command on your prompt, ready to edit — it still never runs anything:
+
+```
+  ┄ shell ┄
+  [1] ls -laSh
+  [2] ls -laShr
+  ┄┄┄┄┄┄┄┄┄
+
+  1-2 put on prompt · c copy · Enter skip
+```
+
+- **zsh**: the command appears on your prompt.
+- **bash**: press **↑** to bring it up (bash can't pre-fill the prompt).
+- **c** copies it instead (`pbcopy`, `wl-copy`, `xclip`, `xsel`, or OSC 52 over SSH).
+- Destructive commands ask for confirmation first. Turn the menu off with `"action_menu": false`.
+
 ---
 
 ## Why TuxAide
@@ -175,18 +193,51 @@ tuxaide index nginx
 tuxaide-uninstall
 ```
 
+`tuxaide on` / `tuxaide off` are remembered across new terminals.
+
+### Configuration
+
+Settings live in `~/.config/tuxaide/config.json`. Reinstalling keeps your existing values.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `prewarm` | `once` (`off` below 8 GB RAM) | Load the model when a shell opens: `off`, `once` (at most every 10 min), `always` |
+| `keep_alive` | `10m` | How long Ollama keeps the model in memory after a question |
+| `cache_ttl_days` | `30` | Cached answers older than this are ignored |
+| `action_menu` | `true` | After an answer, offer to put a command on the prompt or copy it |
+| `failure_hint` | `true` | After a failed command, show the "type ? to ask TuxAide why" hint |
+
+Smart RAG's Python dependencies (ChromaDB) are installed in TuxAide's own virtualenv at `~/.local/share/tuxaide/venv`, never in your system Python, so no `pip` command is needed. `tuxaide-uninstall` removes it.
+
 ---
 
-## Shell Error Context (v2.2)
+## Explain the last error with `?`
 
-TuxAide can explain the last command output/error when you ask follow-up questions such as:
+When a command fails, TuxAide shows a one-line hint. Type `?` to find out why:
+
+```
+$ ls /var/log/nginx
+ls: /var/log/nginx: No such file or directory
+💡 exit 1 — type ? to ask TuxAide why
+$ ?
+```
+
+- `? <question>` asks something specific about the last command.
+- Asking in words works too, right after the failure: `porque deu este erro?`
+- TuxAide remembers only the last command line and its exit code, never its output.
+  To read the error it re-runs the command: read-only commands (`ls`, `cat`, `grep`,
+  `git status`, `systemctl status`, …) are re-run straight away, anything else only
+  after you answer **y**. Interactive programs (`vim`, `top`, …) are never re-run.
+- Turn the hint off with `"failure_hint": false`; `?` keeps working.
+
+### Full output capture with `tuxaide run`
+
+To give TuxAide the complete output of a command up front:
 
 ```bash
 tuxaide run "ls /naoexiste"
 tuxaide "porque deu este erro?"
 ```
-
-This uses local session context from your latest captured shell execution.
 
 ### Capture behavior
 

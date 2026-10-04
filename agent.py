@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """TuxAide v2.1 — Local AI assistant for Linux terminal with Smart RAG."""
 import sys, os, re, json, hashlib, time, urllib.request, urllib.error
-import textwrap, shutil, threading, itertools
+import textwrap, shutil, threading, itertools, subprocess, base64, select, shlex
 
 CFG_FILE  = os.path.expanduser("~/.config/tuxaide/config.json")
 CACHE_DIR = os.path.expanduser("~/.config/tuxaide/cache")
 LOG_DIR   = os.path.expanduser("~/.config/tuxaide/logs")
 PERF_LOG  = os.path.join(LOG_DIR, "perf.log")
 SESSION_FILE = os.path.expanduser("~/.config/tuxaide/session.json")
+PENDING_DIR  = os.path.expanduser("~/.config/tuxaide/pending")
 
 DEFAULTS = {
     "ollama_url":   "http://localhost:11434",
@@ -21,6 +22,40 @@ DEFAULTS = {
     "rag_top_k":    1,
     "rag_db_path":  "~/.config/tuxaide/vectordb",
     "rag_timeout":  8,        # seconds before RAG fallback to LLM
+    "enabled":      True,     # persisted by `tuxaide on/off`
+    "prewarm":      "once",   # "off", "once" (at most every keep_alive), "always"
+    "keep_alive":   "10m",    # how long Ollama keeps the model loaded
+    "cache_ttl_days": 30,
+    "action_menu":  True,     # after an answer: put a command on the prompt / copy it
+    "failure_hint": True,     # after a failed command, hint that `?` explains it
+}
+
+def _parse_bool(v):
+    v = v.strip().lower()
+    if v in ("1", "true", "yes", "on"):  return True
+    if v in ("0", "false", "no", "off"): return False
+    raise ValueError("expected true or false")
+
+def _parse_choice(*choices):
+    def parse(v):
+        if v not in choices:
+            raise ValueError(f"expected one of: {', '.join(choices)}")
+        return v
+    return parse
+
+def _parse_model(v):
+    if not re.fullmatch(r"[A-Za-z0-9._:/-]+", v):
+        raise ValueError("model names may only contain letters, digits and . _ : / -")
+    return v
+
+SETTABLE = {
+    "enabled":         _parse_bool,
+    "session_capture": _parse_bool,
+    "color":           _parse_bool,
+    "model":           _parse_model,
+    "prewarm":         _parse_choice("off", "once", "always"),
+    "action_menu":     _parse_bool,
+    "failure_hint":    _parse_bool,
 }
 
 def cfg():
@@ -31,9 +66,16 @@ def cfg():
     return c
 
 def save_cfg(updates):
-    c = cfg()
+    """Update only the given keys, keeping whatever else the user has in the file."""
+    try:
+        with open(CFG_FILE) as f: c = json.load(f)
+    except Exception:
+        c = {}
     c.update(updates)
-    with open(CFG_FILE, 'w') as f: json.dump(c, f, indent=4)
+    os.makedirs(os.path.dirname(CFG_FILE), exist_ok=True)
+    tmp = CFG_FILE + ".tmp"
+    with open(tmp, 'w') as f: json.dump(c, f, indent=4)
+    os.replace(tmp, CFG_FILE)
 
 class C:
     Z="\033[0m"; B="\033[1m"; D="\033[2m"
@@ -54,7 +96,9 @@ class Spinner:
         sys.stderr.write("\r" + " " * (len(self._msg) + 10) + "\r")
         sys.stderr.flush()
     def start(self): self._t.start(); return self
-    def stop(self):  self._stop.set(); self._t.join()
+    def stop(self):
+        self._stop.set()
+        if self._t.is_alive(): self._t.join()
 
 # ── Question detection ────────────────────────────────────────────────
 KW_PT = ['como faço','como usar','como instalar','como ver','como listar',
@@ -90,10 +134,13 @@ CMDS = {'ls','cd','pwd','mkdir','rm','cp','mv','cat','echo','grep','find',
 # Keywords that signal the question needs local documentation
 RAG_KEYWORDS = {
     'options','flags','man','error','configure','setup','my system',
-    'opções','flags','man','erro','configurar','neste sistema',
-    'options','indicateurs','erreur','configurer','mon système',
+    'opções','erro','configurar','neste sistema',
+    'indicateurs','erreur','configurer','mon système',
     'optionen','fehler','konfigurieren','mein system',
 }
+RAG_KEYWORDS_RE = re.compile(
+    r'\b(?:' + '|'.join(re.escape(k) for k in sorted(RAG_KEYWORDS, key=len, reverse=True)) + r')\b',
+    re.I)
 
 # Destructive command patterns — shown with a warning
 DESTRUCTIVE_PATTERNS = [
@@ -123,19 +170,6 @@ def is_q(text):
         if re.search(r'\b' + re.escape(kw) + r'\b', t, re.I):
             return True
     return t.endswith('?')
-
-def detect_lang(text):
-    t = text.lower()
-    checks = [
-        ("European Portuguese", ['como','porque','porquê','qual','onde','quando','quem','posso']),
-        ("Spanish",             ['cómo','qué','cuál','dónde','cuándo','puedo']),
-        ("French",              ['comment','pourquoi','quel','quelle','où','quand']),
-        ("German",              ['wie','warum','was','welche','können']),
-    ]
-    for lang, kws in checks:
-        for kw in kws:
-            if re.search(r'\b' + kw + r'\b', t): return lang
-    return "English"
 
 def is_context_explain_query(text):
     t = text.strip().lower()
@@ -183,6 +217,158 @@ class ContextIntentDetector:
             return False
         return cls.looks_like_context_followup(text)
 
+# ── Explain the last command (`?` / `tuxaide why`) ────────────────────
+# Re-running is the only way to see the error text (the hook records the
+# command and exit code, never output). Only read-only commands are re-run
+# without asking; anything else needs an explicit "y".
+SAFE_RERUN = {
+    "ls", "cat", "head", "tail", "grep", "egrep", "fgrep", "rg", "find", "stat",
+    "file", "wc", "du", "df", "which", "type", "whereis", "id", "groups", "whoami",
+    "uname", "hostname", "free", "uptime", "ss", "dig", "nslookup", "host",
+    "readlink", "realpath", "tree", "printenv", "date", "diff", "cmp",
+    "md5sum", "sha256sum", "lsblk", "blkid", "getent", "test", "[",
+}
+SAFE_SUBCOMMANDS = {
+    "git":       {"status", "log", "diff", "show", "branch", "remote", "rev-parse", "ls-files", "blame"},
+    "systemctl": {"status", "is-active", "is-enabled", "is-failed", "cat", "list-units", "show"},
+    "docker":    {"ps", "images", "inspect", "logs", "version", "info"},
+    "apt":       {"list", "show", "search", "policy"},
+    "brew":      {"list", "info", "search"},
+    "pip":       {"list", "show"}, "pip3": {"list", "show"},
+    "npm":       {"ls", "list", "view"},
+    "kubectl":   {"get", "describe", "logs"},
+}
+INTERACTIVE = {
+    "vim", "vi", "nvim", "nano", "emacs", "less", "more", "man", "top", "htop", "ssh",
+    "tmux", "screen", "mysql", "psql", "sqlite3", "ftp", "sftp", "watch", "telnet",
+}
+REPL_WITHOUT_ARGS = {"python", "python3", "node", "irb", "bash", "zsh", "sh"}
+UNSAFE_SHELL = re.compile(r"[;&|<>`]|\$\(")
+RERUN_TIMEOUT = 10
+
+def _cmd_words(cmd):
+    try:
+        words = shlex.split(cmd)
+    except ValueError:
+        return []
+    while words and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0]):  # FOO=bar cmd
+        words = words[1:]
+    return words
+
+def rerun_policy(cmd):
+    """'safe' (re-run silently), 'ask' (re-run only after y) or 'never' (interactive)."""
+    words = _cmd_words(cmd)
+    if not words:
+        return "ask"
+    w0 = os.path.basename(words[0])
+    if (w0 in INTERACTIVE or (w0 in REPL_WITHOUT_ARGS and len(words) == 1)
+            or (w0 == "tail" and any(a.startswith("-f") or a == "-F" for a in words))):
+        return "never"
+    if UNSAFE_SHELL.search(cmd):
+        return "ask"
+    if w0 in SAFE_SUBCOMMANDS:
+        return "safe" if len(words) > 1 and words[1] in SAFE_SUBCOMMANDS[w0] else "ask"
+    if w0 == "find" and any(a in ("-delete", "-exec", "-execdir", "-ok", "-okdir",
+                                  "-fprint", "-fprint0", "-fprintf", "-fls") for a in words):
+        return "ask"
+    return "safe" if w0 in SAFE_RERUN else "ask"
+
+def _clip_lines(text, head=20, tail=60):
+    lines = text.splitlines()
+    if len(lines) <= head + tail:
+        return text, False
+    return "\n".join(lines[:head] + [f"[... {len(lines) - head - tail} lines omitted ...]"] + lines[-tail:]), True
+
+def rerun_capture(cmd):
+    """Run cmd non-interactively in the user's shell; return (stdout, stderr, rc, truncated)."""
+    shell = os.environ.get("SHELL") or "/bin/sh"
+    if os.path.basename(shell) not in ("bash", "zsh", "sh", "dash", "ksh"):
+        shell = "/bin/sh"
+    # zsh reads ~/.zshenv even for -c; -f skips it so its noise can't end up
+    # in the captured error.
+    argv = [shell, "-f", "-c", cmd] if os.path.basename(shell) == "zsh" else [shell, "-c", cmd]
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True, errors="replace",
+                           stdin=subprocess.DEVNULL, timeout=RERUN_TIMEOUT)
+        out, err, rc = p.stdout, p.stderr, p.returncode
+    except subprocess.TimeoutExpired as e:
+        dec = lambda b: (b.decode(errors="replace") if isinstance(b, bytes) else (b or ""))
+        out, err, rc = dec(e.stdout), dec(e.stderr) + f"\n[stopped after {RERUN_TIMEOUT}s]", None
+    out, t1 = _clip_lines(out)
+    err, t2 = _clip_lines(err)
+    return out, err, rc, (t1 or t2)
+
+# `?` with no words: ask in the user's locale language, so the answer comes
+# back in it (the model replies in the language of the question).
+WHY_QUESTION = {
+    "en": "Why did this command fail, and how do I fix it? Give the corrected command if there is one.",
+    "pt": "Porque é que este comando falhou e como o corrijo? Indica o comando corrigido, se houver. Responde em português.",
+    "es": "¿Por qué falló este comando y cómo lo soluciono? Da el comando corregido si lo hay. Responde en español.",
+    "fr": "Pourquoi cette commande a-t-elle échoué et comment la corriger ? Donne la commande corrigée s'il y en a une. Réponds en français.",
+    "de": "Warum ist dieser Befehl fehlgeschlagen und wie behebe ich das? Gib den korrigierten Befehl an, falls es einen gibt. Antworte auf Deutsch.",
+    "it": "Perché questo comando è fallito e come lo risolvo? Indica il comando corretto, se esiste. Rispondi in italiano.",
+}
+
+def default_why_question():
+    loc = (os.environ.get("LC_ALL") or os.environ.get("LC_MESSAGES") or os.environ.get("LANG") or "")
+    return WHY_QUESTION.get(loc[:2].lower(), WHY_QUESTION["en"])
+
+def ask_yes(prompt, timeout=20):
+    """y/N question on the terminal. False when there's no terminal."""
+    if not (sys.stdout.isatty() and sys.stdin.isatty()):
+        return False
+    try:
+        with open("/dev/tty", "r+b", buffering=0) as tty:
+            try:
+                key = read_key(tty, timeout, f"\r\033[K  {prompt}".encode())
+            except KeyboardInterrupt:
+                key = ""
+            tty.write(b"\r\033[K"); tty.flush()
+            return key.lower() == "y"
+    except OSError:
+        return False
+
+def explain_last_command(c, cmd, rc, user_q=""):
+    """`?`: explain the last command, re-running it (when safe or allowed) to see its error."""
+    if not cmd:
+        render_text("Nothing to explain yet. Run a command first, then type `?`.", c)
+        return
+    try: rc = int(rc)
+    except (TypeError, ValueError): rc = None
+    if rc == 0 and not user_q:
+        render_text(f"The last command succeeded (exit 0):\n\n```text\n{cmd}\n```\n\n"
+                    "Ask something about it with: `? <your question>`", c)
+        return
+
+    policy = rerun_policy(cmd)
+    run_it = policy == "safe" or (
+        policy == "ask" and ask_yes(f"{C.D}Re-run {C.Z}{cmd}{C.D} to read its error? [y/N]{C.Z}"))
+    stdout = stderr = ""
+    truncated, rerun_rc = False, None
+    if run_it:
+        sys.stderr.write(f"  {C.D}re-running: {cmd}{C.Z}\n"); sys.stderr.flush()
+        stdout, stderr, rerun_rc, truncated = rerun_capture(cmd)
+    elif policy == "never":
+        stderr = "(interactive program: output was not captured)"
+    else:
+        stderr = "(output not captured: explain from the command and exit code)"
+
+    question = user_q or default_why_question()
+    if not run_it:
+        # Said next to the question, or small models just ask for the error text.
+        question += ("\n(This is about a shell command that failed on the user's system. Its error "
+                     "output isn't available, so don't ask for it: list the most likely causes for "
+                     "this command and exit code, and how to check each one.)")
+    run = {"command": cmd, "exit_code": rc, "stdout": stdout, "stderr": stderr,
+           "output_truncated": truncated}
+    effective_q = build_contextual_question(question, run)
+    if run_it and rerun_rc is not None and rerun_rc != rc:
+        effective_q += f"\n(Note: when re-run just now it exited with {rerun_rc}.)\n"
+
+    spinner = Spinner().start()
+    _, ok, _, commands = answer_streaming(effective_q, c, None, "llm", spinner)
+    action_menu(commands, c)
+
 def default_context_query():
     return "Explain the last shell command output and error in simple terms. Identify cause and suggest next step."
 
@@ -226,10 +412,16 @@ def normalize(q):
 def cache_key(text):
     return hashlib.md5(text.encode()).hexdigest()
 
-def cache_get(kind, key):
-    """kind: 'answers' or 'embeddings'"""
+def answer_cache_key(norm_q, c):
+    """Answers depend on the model and the configured mode, not just the question."""
+    return cache_key(f"{c.get('model')}|{c.get('mode', 'llm')}|{norm_q}")
+
+def cache_get(kind, key, max_age_days=None):
+    """kind: 'answers' or 'embeddings'. Entries older than max_age_days are ignored."""
     path = os.path.join(CACHE_DIR, kind, key + ".json")
     try:
+        if max_age_days and time.time() - os.path.getmtime(path) > max_age_days * 86400:
+            return None
         with open(path) as f:
             return json.load(f)
     except Exception:
@@ -246,14 +438,16 @@ def cache_set(kind, key, value):
         pass
 
 # ── Performance log ───────────────────────────────────────────────────
-def perf_log(question, mode, t_embed, t_rag, t_llm, cache_hit):
+def perf_log(question, mode, t_embed, t_rag, t_llm, cache_hit, ttft=None):
     try:
         os.makedirs(LOG_DIR, exist_ok=True)
         total = t_embed + t_rag + t_llm
         ts = time.strftime("%Y-%m-%dT%H:%M:%S")
         line = (f"{ts}\t{mode}\t"
                 f"embed={t_embed:.2f}s\trag={t_rag:.2f}s\t"
-                f"llm={t_llm:.2f}s\ttotal={total:.2f}s\t"
+                f"llm={t_llm:.2f}s\t"
+                f"ttft={'-' if ttft is None else f'{ttft:.2f}s'}\t"
+                f"total={total:.2f}s\t"
                 f"cache={'hit' if cache_hit else 'miss'}\t"
                 f"q={question[:80].replace(chr(9),' ')}\n")
         with open(PERF_LOG, "a") as f:
@@ -272,11 +466,9 @@ def detect_command(question):
 
 def should_use_rag(question):
     """Return True if the question likely needs local man page documentation."""
-    t = question.lower()
-    # Explicit RAG keywords
-    for kw in RAG_KEYWORDS:
-        if kw in t:
-            return True
+    # Explicit RAG keywords (whole words only)
+    if RAG_KEYWORDS_RE.search(question):
+        return True
     # Mentions a specific command → probably needs docs
     if detect_command(question):
         return True
@@ -350,7 +542,7 @@ def is_destructive(text):
     return False
 
 # ── Prompt builders ───────────────────────────────────────────────────
-def build_prompt(lang, passages=None):
+def build_prompt(passages=None):
     NL = chr(10)
     base = (
         "You are TuxAide, an assistant specialised EXCLUSIVELY in Linux and Unix systems." + NL +
@@ -358,8 +550,10 @@ def build_prompt(lang, passages=None):
         "system administration, networking, commands, scripts, or Unix/Linux tools. "
         "If the question is NOT about Linux/Unix/terminal, reply with ONE short sentence "
         "only, saying you are a Linux specialist. Do not explain or apologise." + NL +
-        f"MANDATORY LANGUAGE RULE: You MUST reply entirely in {lang}. "
-        f"Every single word must be in {lang}. This rule overrides everything else." + NL
+        "MANDATORY LANGUAGE RULE: Reply entirely in the same language the user wrote "
+        "their question in (the user's question is the text before any [Session context] block). "
+        "If the question mixes languages, use the language of most of its words. "
+        "This rule overrides everything else." + NL
     )
     if passages:
         context = "\n\n".join(
@@ -382,12 +576,15 @@ def build_prompt(lang, passages=None):
     return base
 
 # ── Ollama query ──────────────────────────────────────────────────────
-def ask_ollama(q, c, passages=None):
-    lang = detect_lang(q)
+class OllamaError(Exception):
+    pass
+
+def stream_ollama(q, c, passages=None):
+    """Yield answer text chunks as Ollama generates them. Raises OllamaError."""
     pay = {
         "model": c["model"],
         "messages": [
-            {"role": "system", "content": build_prompt(lang, passages)},
+            {"role": "system", "content": build_prompt(passages)},
             {"role": "user",   "content": q + (
                 "\n\n[Important: end your answer with exactly: Source: <man page name>]"
                 if passages else ""
@@ -396,6 +593,7 @@ def ask_ollama(q, c, passages=None):
         "options": {"temperature": c.get("temperature", 0.1),
                     "num_predict": c.get("max_tokens", 300),
                     "num_gpu": c.get("num_gpu", 99)},
+        "keep_alive": c.get("keep_alive", "10m"),
         "stream": True
     }
     req = urllib.request.Request(
@@ -403,59 +601,299 @@ def ask_ollama(q, c, passages=None):
         data=json.dumps(pay).encode(),
         headers={"Content-Type": "application/json"}, method="POST"
     )
-    out = []
     try:
         with urllib.request.urlopen(req, timeout=60) as r:
             for ln in r:
                 ln = ln.strip()
                 if not ln: continue
-                try: out.append(json.loads(ln).get("message",{}).get("content",""))
-                except Exception: pass
+                try: msg = json.loads(ln)
+                except Exception: continue
+                if msg.get("error"):
+                    raise OllamaError(msg["error"])
+                chunk = msg.get("message", {}).get("content", "")
+                if chunk:
+                    yield chunk
+    except OllamaError:
+        raise
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try: detail = json.loads(e.read()).get("error", "")
+        except Exception: pass
+        raise OllamaError(detail or f"HTTP {e.code}")
     except urllib.error.URLError:
-        return "[Error] Ollama not available. Try: sudo systemctl start ollama"
+        raise OllamaError("Ollama not available. Try: sudo systemctl start ollama")
     except Exception as e:
-        return f"[Error] {e}"
-    return "".join(out).strip()
+        raise OllamaError(str(e) or e.__class__.__name__)
 
 # ── Formatting ────────────────────────────────────────────────────────
-def fmt(text, c, mode="llm", destructive=False):
-    cols  = shutil.get_terminal_size((80,24)).columns
-    color = c.get("color", True)
-    mode_label = f" · Smart RAG" if mode == "smart" else (" · RAG" if mode == "deep" else "")
-    top = (f"{C.Y}{C.B}╭{'─'*(cols-2)}╮{C.Z}" if color else f"┌{'─'*(cols-2)}┐")
-    bot = (f"{C.Y}{C.B}╰{'─'*(cols-2)}╯{C.Z}" if color else f"└{'─'*(cols-2)}┘")
-    lbl = (f"{C.Y}{C.B}╞═ 🐧 TuxAide {C.D}(Ollama · {c['model']}{mode_label}){C.Z}{C.Y}{C.B} ═╡{C.Z}"
-           if color else f"╞═ TuxAide ═╡")
-    out = ["", top, lbl]
-    # Destructive warning — shown before any code block
-    if destructive:
-        warn_line = (
-            f"  {C.RD}{C.B}⚠  WARNING: This command is destructive and irreversible."
-            f" Verify carefully before running.{C.Z}"
-            if color else
-            "  ⚠  WARNING: This command is destructive and irreversible. Verify carefully before running."
-        )
-        out.append("")
-        out.append(warn_line)
-    in_code = False
-    for line in text.split('\n'):
-        if line.startswith('```'):
-            in_code = not in_code
-            lang = line[3:].strip() or "shell"
-            out.append(f"  {C.D}┄ {lang} ┄{C.Z}" if color else f"  ┄ {lang} ┄")
-            continue
-        if in_code:
-            out.append(f"  {C.G}{line}{C.Z}" if color else f"  {line}")
-            continue
+class Renderer:
+    """Incremental formatter: prints the answer box line by line as text streams in.
+
+    Code blocks are buffered until they close so the destructive-command warning
+    can be shown above the block that triggered it.
+    """
+    def __init__(self, c, mode="llm", out=None, numbered=False):
+        self.out   = out or sys.stdout
+        self.numbered = numbered
+        self.commands = []     # runnable commands found in shell code blocks
+        self.color = c.get("color", True)
+        self.model = c.get("model", "")
+        self.mode  = mode
+        self.cols  = max(shutil.get_terminal_size((80, 24)).columns, 24)
+        self.buf   = ""
+        self.code  = None      # list of lines while inside a code block
+        self.code_lang = "shell"
+        self.started = False
+        self.last_blank = True
+
+    def _w(self, line=""):
+        self.out.write(line + "\n")
+        self.out.flush()
+        self.last_blank = not line
+
+    def header(self):
+        if self.started: return
+        self.started = True
+        cols, color = self.cols, self.color
+        mode_label = " · Smart RAG" if self.mode == "smart" else (" · RAG" if self.mode == "deep" else "")
+        self._w()
+        self._w(f"{C.Y}{C.B}╭{'─'*(cols-2)}╮{C.Z}" if color else f"┌{'─'*(cols-2)}┐")
+        self._w(f"{C.Y}{C.B}╞═ 🐧 TuxAide {C.D}(Ollama · {self.model}{mode_label}){C.Z}{C.Y}{C.B} ═╡{C.Z}"
+                if color else "╞═ TuxAide ═╡")
+
+    def feed(self, chunk):
+        self.header()
+        self.buf += chunk
+        while "\n" in self.buf:
+            line, self.buf = self.buf.split("\n", 1)
+            self._line(line)
+
+    def finish(self):
+        self.header()
+        if self.buf:
+            self._line(self.buf)
+            self.buf = ""
+        if self.code is not None:
+            self._flush_code()
+        self._w(f"{C.Y}{C.B}╰{'─'*(self.cols-2)}╯{C.Z}" if self.color else f"└{'─'*(self.cols-2)}┘")
+        self._w()
+
+    def _flush_code(self):
+        color = self.color
+        if is_destructive("\n".join(self.code)):
+            if not self.last_blank:
+                self._w()
+            warning = ("⚠  WARNING: This command is destructive and irreversible."
+                       " Verify carefully before running.")
+            for w in textwrap.wrap(warning, width=self.cols - 4):
+                self._w(f"  {C.RD}{C.B}{w}{C.Z}" if color else f"  {w}")
+        self._w(f"  {C.D}┄ {self.code_lang} ┄{C.Z}" if color else f"  ┄ {self.code_lang} ┄")
+        starts = {}
+        if self.numbered and self.code_lang.lower() in SHELL_LANGS:
+            for idx, cmd in extract_commands(self.code):
+                if len(self.commands) < MAX_COMMANDS:
+                    self.commands.append(cmd)
+                    starts[idx] = len(self.commands)
+        pad = "    " if self.numbered and self.commands else ""
+        for i, line in enumerate(self.code):
+            if i in starts:
+                num = f"[{starts[i]}] "
+                self._w(f"  {C.Y}{num}{C.Z}{C.G}{line}{C.Z}" if color else f"  {num}{line}")
+            else:
+                self._w(f"  {pad}{C.G}{line}{C.Z}" if color else f"  {pad}{line}")
+        rule = "┄" * (len(self.code_lang) + 4)
+        self._w(f"  {C.D}{rule}{C.Z}" if color else f"  {rule}")
+        self.code = None
+
+    def _line(self, line):
+        if line.strip().startswith("```"):
+            if self.code is None:
+                self.code = []
+                self.code_lang = line.strip()[3:].strip() or "shell"
+            else:
+                self._flush_code()
+            return
+        if self.code is not None:
+            self.code.append(line)
+            return
         if not line.strip():
-            out.append(""); continue
-        if color:
+            self._w(); return
+        if self.color:
             line = re.sub(r'\*\*(.+?)\*\*', f'{C.B}\\1{C.Z}', line)
             line = re.sub(r'`([^`]+)`', f'{C.G}\\1{C.Z}', line)
-        for w in textwrap.wrap(line, width=cols-4+20, break_long_words=False):
-            out.append(f"  {w}")
-    out += [bot, ""]
-    return "\n".join(out)
+        # Escape codes count towards the width, so coloured lines wrap a little
+        # early but never overflow the terminal.
+        for w in textwrap.wrap(line, width=self.cols - 4, break_long_words=False):
+            self._w(f"  {w}")
+
+SHELL_LANGS  = {"shell", "bash", "sh", "zsh", "console", "terminal"}
+MAX_COMMANDS = 9
+
+def extract_commands(lines):
+    """Return [(line_index, command)] for the runnable lines of a shell code block.
+
+    Skips blank lines and comments, strips a leading "$ " prompt and joins
+    backslash continuations into one command.
+    """
+    out, i = [], 0
+    while i < len(lines):
+        s = lines[i].strip()
+        if not s or s.startswith("#"):
+            i += 1; continue
+        if s.startswith("$ "):
+            s = s[2:].strip()
+        start, parts = i, [s]
+        while parts[-1].endswith("\\") and i + 1 < len(lines):
+            i += 1
+            parts.append(lines[i].strip())
+        cmd = "\n".join(parts).strip()
+        if cmd and cmd not in (c for _, c in out):
+            out.append((start, cmd))
+        i += 1
+    return out
+
+def menu_enabled(c):
+    return bool(c.get("action_menu", True)) and sys.stdout.isatty() and sys.stdin.isatty()
+
+def render_text(text, c, mode="llm"):
+    """Render a complete answer (cache hits, messages) in one go. Returns the commands found."""
+    r = Renderer(c, mode, numbered=menu_enabled(c))
+    r.feed(text)
+    r.finish()
+    return r.commands
+
+def answer_streaming(q, c, passages, mode, spinner):
+    """Stream the answer to the terminal. Returns (answer, ok, ttft, commands)."""
+    r = Renderer(c, mode, numbered=menu_enabled(c))
+    parts, ttft, ok = [], None, True
+    t0 = time.time()
+    try:
+        for chunk in stream_ollama(q, c, passages):
+            if ttft is None:
+                ttft = time.time() - t0
+                spinner.stop()
+            parts.append(chunk)
+            r.feed(chunk)
+    except OllamaError as e:
+        ok = False
+        spinner.stop()
+        r.feed(("\n\n" if parts else "") + f"[Error] {e}")
+    except KeyboardInterrupt:
+        ok = False
+        spinner.stop()
+        r.feed("\n\n[Interrupted]")
+    spinner.stop()
+    answer = "".join(parts).strip()
+    if not answer and ok:
+        ok = False
+        r.feed("[Error] Empty answer from the model.")
+    r.finish()
+    return answer, ok, ttft, (r.commands if ok else [])
+
+# ── After-answer actions: put a command on the prompt, or copy it ─────
+def read_key(tty, timeout, prompt=b""):
+    """Show prompt, then read one keypress without echo. Returns '' on timeout.
+
+    Raw mode is entered *before* the prompt is shown: keys typed while the
+    answer was streaming are discarded, and nothing pressed after the prompt
+    appears can be lost.
+    """
+    import termios, tty as ttymod
+    fd = tty.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        ttymod.setcbreak(fd, termios.TCSAFLUSH)
+        tty.write(prompt); tty.flush()
+        ready, _, _ = select.select([fd], [], [], timeout)
+        if not ready:
+            return ""
+        ch = os.read(fd, 1)
+        if ch == b"\x1b":                      # swallow the rest of an escape sequence
+            while select.select([fd], [], [], 0.02)[0]:
+                os.read(fd, 16)
+        return ch.decode(errors="ignore")
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+def copy_to_clipboard(text, tty):
+    """Copy with the first available tool; fall back to OSC 52 (works over SSH)."""
+    tools = [["pbcopy"]]
+    if os.environ.get("WAYLAND_DISPLAY"):
+        tools.append(["wl-copy"])
+    tools += [["xclip", "-selection", "clipboard"], ["xsel", "--clipboard", "--input"]]
+    for tool in tools:
+        if shutil.which(tool[0]):
+            try:
+                subprocess.run(tool, input=text.encode(), check=True,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
+                return True
+            except Exception:
+                continue
+    try:
+        tty.write(f"\033]52;c;{base64.b64encode(text.encode()).decode()}\a".encode())
+        tty.flush()
+        return True
+    except Exception:
+        return False
+
+def stage_for_prompt(cmd):
+    """Hand the command to the parent shell's prompt hook. False if no hook is listening."""
+    pid = os.environ.get("TUXAIDE_SHELL_PID", "")
+    if not pid.isdigit():
+        return False
+    try:
+        os.makedirs(PENDING_DIR, exist_ok=True)
+        with open(os.path.join(PENDING_DIR, pid), "w") as f:
+            f.write(cmd)
+        return True
+    except OSError:
+        return False
+
+def action_menu(commands, c, timeout=15):
+    if not commands or not menu_enabled(c):
+        return
+    try:
+        tty = open("/dev/tty", "r+b", buffering=0)
+    except OSError:
+        return
+    n = len(commands)
+    def say(msg, end="\n"):
+        tty.write(f"\r\033[K  {msg}{end}".encode()); tty.flush()
+    def pick(prompt):
+        try:
+            return read_key(tty, timeout, f"\r\033[K  {C.D}{prompt}{C.Z}".encode())
+        except KeyboardInterrupt:
+            return ""
+        finally:
+            tty.write(b"\r\033[K"); tty.flush()
+    def number(key):
+        return int(key) if key.isdigit() and 1 <= int(key) <= n else None
+
+    keys = "1" if n == 1 else f"1-{n}"
+    key = pick(f"{keys} put on prompt · c copy · Enter skip")
+    try:
+        if key.lower() == "c":
+            idx = 1 if n == 1 else number(pick(f"copy which? {keys}"))
+            if idx and copy_to_clipboard(commands[idx - 1], tty):
+                say(f"{C.G}✓ Copied:{C.Z} {commands[idx - 1]}")
+            return
+        idx = number(key)
+        if not idx:
+            return
+        cmd = commands[idx - 1]
+        if is_destructive(cmd):
+            if pick(f"{C.RD}⚠ Destructive command.{C.Z}{C.D} Put it on the prompt anyway? [y/N]").lower() != "y":
+                say(f"{C.D}Skipped.{C.Z}")
+                return
+        if stage_for_prompt(cmd):
+            if os.environ.get("TUXAIDE_SHELL") == "zsh":
+                say(f"{C.G}✓ On your prompt{C.Z}{C.D} — edit it or press Enter to run{C.Z}")
+            else:
+                say(f"{C.G}✓ Press ↑{C.Z}{C.D} to get it on your prompt{C.Z}")
+        elif copy_to_clipboard(cmd, tty):
+            say(f"{C.G}✓ Copied:{C.Z} {cmd}")
+    finally:
+        tty.close()
 
 def ollama_ok(c):
     try:
@@ -473,6 +911,19 @@ def main():
     if mode_arg == "--check":
         sys.exit(0 if is_q(" ".join(sys.argv[2:])) else 1)
 
+    # --set KEY VALUE: persist a config value (used by the shell hook)
+    if mode_arg == "--set":
+        if len(sys.argv) != 4 or sys.argv[2] not in SETTABLE:
+            print(f"Usage: tuxaide --set <{'|'.join(sorted(SETTABLE))}> <value>")
+            sys.exit(2)
+        key, raw = sys.argv[2], sys.argv[3]
+        try:
+            save_cfg({key: SETTABLE[key](raw)})
+        except ValueError as e:
+            print(f"Invalid value for {key}: {e}")
+            sys.exit(2)
+        return
+
     # --explain-last: force contextual explanation from last shell run
     if mode_arg == "--explain-last":
         c = cfg()
@@ -483,14 +934,25 @@ def main():
         last_run = load_last_shell_context()
         if not last_run:
             msg = "No recent shell execution context found in this session. Run a command with: tuxaide run \"<command>\""
-            print(fmt(msg, c, "llm", False))
+            render_text(msg, c, "llm")
             return
         user_q = " ".join(sys.argv[2:]).strip() or default_context_query()
         effective_q = build_contextual_question(user_q, last_run)
         spinner = Spinner().start()
-        answer = ask_ollama(effective_q, c, None)
-        spinner.stop()
-        print(fmt(answer, c, "llm", is_destructive(answer)))
+        _, _, _, commands = answer_streaming(effective_q, c, None, "llm", spinner)
+        action_menu(commands, c)
+        return
+
+    # --why CMD RC [QUESTION...]: explain the last command (the `?` alias)
+    if mode_arg == "--why":
+        c = cfg()
+        if not ollama_ok(c):
+            print(f"\n{C.O}⚠ Ollama not available.{C.Z}")
+            print(f"{C.D}  Try: sudo systemctl start ollama{C.Z}\n")
+            return
+        cmd = sys.argv[2] if len(sys.argv) > 2 else ""
+        rc  = sys.argv[3] if len(sys.argv) > 3 else ""
+        explain_last_command(c, cmd.strip(), rc, " ".join(sys.argv[4:]).strip())
         return
 
     # mode: switch between llm, smart, deep (rag kept as alias for deep)
@@ -504,7 +966,8 @@ def main():
         if new_mode not in ("llm", "smart", "deep"):
             print("Usage: tuxaide mode [llm|smart|deep]"); return
         if new_mode in ("smart", "deep") and not rag_available():
-            print(f"{C.O}⚠ RAG requires chromadb: pip install chromadb{C.Z}"); return
+            print(f"{C.O}⚠ RAG requires chromadb, which isn't installed.{C.Z}")
+            print(f"{C.D}  Re-run the TuxAide installer and answer Y to Smart RAG.{C.Z}"); return
         top_k = 1 if new_mode == "smart" else 3
         max_tokens = 300 if new_mode in ("llm", "smart") else 600
         save_cfg({"mode": new_mode, "rag_top_k": top_k, "max_tokens": max_tokens})
@@ -518,13 +981,13 @@ def main():
             print("Usage: tuxaide index <command>  (e.g. tuxaide index nginx)")
             return
         print(f"🐧 Indexing man page for: {cmd}")
-        os.system(f"tuxaide-index {cmd}")
+        subprocess.run(["tuxaide-index", cmd])
         return
 
     # reindex: re-index all man pages
     if mode_arg == "reindex":
         print("🐧 Re-indexing all man pages...")
-        os.system("tuxaide-index --all")
+        subprocess.run(["tuxaide-index", "--all"])
         return
 
     # timing: show last N lines of perf log
@@ -550,6 +1013,15 @@ def main():
         print(f"{C.D}  Try: sudo systemctl start ollama{C.Z}\n")
         sys.exit(0)
 
+    # "why did this fail?" right after a failed command → same as `?`
+    shell_cmd = os.environ.get("TUXAIDE_LAST_CMD", "").strip()
+    shell_rc  = os.environ.get("TUXAIDE_LAST_RC", "")
+    if (shell_cmd and shell_rc not in ("", "0")
+            and not re.match(r"(tuxaide|tux)\s+run\b", shell_cmd)
+            and ContextIntentDetector.looks_like_context_followup(q)):
+        explain_last_command(c, shell_cmd, shell_rc, q)
+        return
+
     effective_q = q
     last_run = load_last_shell_context() if c.get("session_capture", False) else None
     context_query = ContextIntentDetector.should_explain_last(
@@ -561,20 +1033,21 @@ def main():
         effective_q = build_contextual_question(q, last_run)
 
     norm_q    = normalize(effective_q if context_query else q)
-    ans_key   = cache_key(norm_q)
+    ans_key   = answer_cache_key(norm_q, c)
     t_embed   = 0.0
     t_rag     = 0.0
     t_llm     = 0.0
     cache_hit = False
 
     # ── Answer cache lookup ───────────────────────────────────────────
-    cached_answer = None if context_query else cache_get("answers", ans_key)
-    if cached_answer:
+    cached_answer = None if context_query else cache_get(
+        "answers", ans_key, c.get("cache_ttl_days", 30))
+    if cached_answer and cached_answer.get("answer"):
         cache_hit = True
         answer    = cached_answer["answer"]
         act_mode  = cached_answer.get("mode", "llm")
         perf_log(norm_q, act_mode + "+cache", 0, 0, 0, True)
-        print(fmt(answer, c, act_mode, is_destructive(answer)))
+        action_menu(render_text(answer, c, act_mode), c)
         return
 
     # ── Determine mode and whether to use RAG ────────────────────────
@@ -619,21 +1092,18 @@ def main():
         if passages:
             act_mode = "deep"
 
-    # ── LLM call ──────────────────────────────────────────────────────
+    # ── LLM call, streamed straight to the terminal ───────────────────
     t_llm_start = time.time()
-    answer = ask_ollama(effective_q, c, passages if passages else None)
+    answer, ok, ttft, commands = answer_streaming(
+        effective_q, c, passages if passages else None, act_mode, spinner)
     t_llm = time.time() - t_llm_start
 
-    spinner.stop()
-
-    # ── Cache the answer ──────────────────────────────────────────────
-    if not context_query:
+    # ── Cache the answer (never errors or partial answers) ────────────
+    if ok and not context_query:
         cache_set("answers", ans_key, {"answer": answer, "mode": act_mode})
 
-    # ── Perf log ──────────────────────────────────────────────────────
-    perf_log(norm_q, act_mode, t_embed, t_rag, t_llm, False)
+    perf_log(norm_q, act_mode, t_embed, t_rag, t_llm, False, ttft)
 
-    # ── Output ────────────────────────────────────────────────────────
-    print(fmt(answer, c, act_mode, is_destructive(answer)))
+    action_menu(commands, c)
 
 if __name__ == "__main__": main()

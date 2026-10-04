@@ -53,6 +53,7 @@ ask()   { echo -e "  ${MG}?${R}  $*"; }
 STEP=0
 TOTAL_STEPS=9
 INSTALL_RAG=false
+VENV="${HOME}/.local/share/tuxaide/venv"
 
 # ═══════════════════════════════════════════════════════════════════════
 # STEP 1 — System diagnosis
@@ -293,15 +294,54 @@ install_dependencies() {
     PY_VER=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
     ok "Python $PY_VER"
 
-    # RAG dependencies
-    if [[ "$INSTALL_RAG" == "true" ]]; then
-        info "Installing RAG dependencies (chromadb, tiktoken)..."
-        python3 -m pip install chromadb tiktoken --break-system-packages -q 2>/dev/null || \
-        python3 -m pip install chromadb tiktoken -q 2>/dev/null || \
-        pip3 install chromadb tiktoken -q 2>/dev/null || \
-        warn "Could not install chromadb automatically. Run: pip install chromadb tiktoken"
-        ok "RAG dependencies installed"
+    [[ "$INSTALL_RAG" == "true" ]] && setup_rag_venv
+    return 0
+}
+
+# RAG dependencies go into TuxAide's own virtualenv, never into the system
+# Python: no `pip` command needed, no --break-system-packages, and uninstall
+# removes them cleanly.
+setup_rag_venv() {
+    if [[ -x "$VENV/bin/python" ]] && "$VENV/bin/python" -c 'import chromadb, tiktoken' &>/dev/null; then
+        ok "RAG dependencies already installed (venv: ${VENV})"
+        return 0
     fi
+    info "Installing RAG dependencies (chromadb, tiktoken) into ${VENV}..."
+
+    # Debian/Ubuntu ship venv support as a separate package.
+    if [[ "$PKG_MGR" == "apt-get" ]] && ! python3 -c 'import ensurepip' &>/dev/null; then
+        info "Installing python3-venv..."
+        if [[ $EUID -eq 0 ]]; then $INSTALL python3-venv &>/dev/null || true
+        else sudo $INSTALL python3-venv &>/dev/null || true; fi
+    fi
+
+    # Try the default python3 first, then other installed versions, in case
+    # chromadb has no wheels yet for the newest Python.
+    local -a candidates=(python3)
+    local v
+    for v in 3.13 3.12 3.11 3.10; do
+        command -v "python${v}" &>/dev/null && candidates+=("python${v}")
+    done
+
+    local py log="/tmp/tuxaide_venv.log"
+    : > "$log"
+    for py in "${candidates[@]}"; do
+        rm -rf "$VENV"
+        mkdir -p "$(dirname "$VENV")"
+        if "$py" -m venv "$VENV" >>"$log" 2>&1 \
+           && "$VENV/bin/python" -m pip install -q --upgrade pip >>"$log" 2>&1 \
+           && "$VENV/bin/python" -m pip install -q chromadb tiktoken >>"$log" 2>&1 \
+           && "$VENV/bin/python" -c 'import chromadb, tiktoken' >>"$log" 2>&1; then
+            ok "RAG dependencies installed ($("$VENV/bin/python" --version 2>&1), venv: ${VENV})"
+            return 0
+        fi
+        info "$py: could not set up the RAG environment, trying next Python..."
+    done
+
+    rm -rf "$VENV"
+    warn "Could not install chromadb (details: $log)."
+    warn "Continuing in LLM-only mode. Re-run the installer later to enable Smart RAG."
+    INSTALL_RAG=false
 }
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -464,6 +504,13 @@ fetch_component() {
     curl -fsSL "${base_url}/${name}" -o "$dest" || return 1
 }
 
+# When the RAG venv exists, run the script with its Python so chromadb is importable.
+use_venv_python() {
+    local file="$1"
+    [[ -x "$VENV/bin/python" ]] || return 0
+    { echo "#!${VENV}/bin/python"; tail -n +2 "$file"; } > "${file}.tmp" && mv "${file}.tmp" "$file"
+}
+
 install_agent() {
     step "Installing TuxAide components"
 
@@ -475,28 +522,55 @@ install_agent() {
     mkdir -p "$BIN" "$CFG"
 
     fetch_component "agent.py" "${BIN}/tuxaide" "$SRC_DIR" || err "Failed to fetch agent.py"
+    use_venv_python "${BIN}/tuxaide"
     chmod +x "${BIN}/tuxaide"
     ok "Binary installed → ${BIN}/tuxaide"
 
     local mode_val="llm"
     [[ "$INSTALL_RAG" == "true" ]] && mode_val="smart"
 
-    cat > "${CFG}/config.json" << JEOF
-{
+    # Keeping a resident 4.7 GB model warm on small machines hurts more than it helps.
+    local prewarm_val="once"
+    [[ $RAM_GB -lt 8 ]] && prewarm_val="off"
+
+    # Merge with any existing config: settings the user already has win,
+    # new keys get these defaults. Values are passed as arguments, not interpolated.
+    local cfg_msg
+    cfg_msg=$(python3 - "${CFG}/config.json" "$MODEL" "$mode_val" "$prewarm_val" <<'PYEOF'
+import json, os, sys
+path, model, mode, prewarm = sys.argv[1:5]
+defaults = {
     "ollama_url": "http://localhost:11434",
-    "model": "${MODEL}",
+    "model": model,
     "embed_model": "nomic-embed-text",
     "max_tokens": 300,
     "temperature": 0.1,
-    "color": true,
-    "mode": "${mode_val}",
-    "session_capture": true,
+    "color": True,
+    "mode": mode,
+    "session_capture": True,
     "rag_top_k": 1,
     "rag_timeout": 8,
-    "rag_db_path": "~/.config/tuxaide/vectordb"
+    "rag_db_path": "~/.config/tuxaide/vectordb",
+    "enabled": True,
+    "prewarm": prewarm,
+    "keep_alive": "10m",
+    "cache_ttl_days": 30,
+    "action_menu": True,
+    "failure_hint": True,
 }
-JEOF
-    ok "Config → ${CFG}/config.json  (mode: ${mode_val})"
+existing = {}
+try:
+    with open(path) as f: existing = json.load(f)
+except Exception:
+    pass
+merged = {**defaults, **existing}
+tmp = path + ".tmp"
+with open(tmp, "w") as f: json.dump(merged, f, indent=4)
+os.replace(tmp, path)
+print(f"kept existing settings, mode: {merged['mode']}" if existing else f"mode: {merged['mode']}")
+PYEOF
+) || err "Failed to write ${CFG}/config.json"
+    ok "Config → ${CFG}/config.json  (${cfg_msg})"
 
     fetch_component "hook.sh" "${CFG}/hook.sh" "$SRC_DIR" || err "Failed to fetch hook.sh"
     ok "Hook installed → ${CFG}/hook.sh"
@@ -511,6 +585,7 @@ JEOF
 
     if [[ "$INSTALL_RAG" == "true" ]]; then
         fetch_component "indexer.py" "${BIN}/tuxaide-index" "$SRC_DIR" || err "Failed to fetch indexer.py"
+        use_venv_python "${BIN}/tuxaide-index"
         chmod +x "${BIN}/tuxaide-index"
         ok "Indexer installed → ${BIN}/tuxaide-index"
     fi
@@ -527,7 +602,7 @@ index_man_pages() {
     info "Indexing the top 100 most useful Linux commands..."
     echo ""
 
-    if python3 "${HOME}/.local/bin/tuxaide-index" --all; then
+    if "${HOME}/.local/bin/tuxaide-index" --all; then
         ok "Man pages indexed successfully"
     else
         warn "Indexing failed — Smart RAG mode will fallback to LLM automatically"
@@ -599,7 +674,7 @@ final_check() {
 
     if [[ "$INSTALL_RAG" == "true" ]]; then
         _chk "nomic-embed-text model" "ollama list | grep -q nomic-embed-text"
-        _chk "ChromaDB installed"     "python3 -c 'import chromadb'"
+        _chk "ChromaDB installed"     "'${VENV}/bin/python' -c 'import chromadb'"
         _chk "Vector DB exists"       "test -d ${HOME}/.config/tuxaide/vectordb"
     fi
 
