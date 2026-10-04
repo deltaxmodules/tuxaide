@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """TuxAide v2.1 — Local AI assistant for Linux terminal with Smart RAG."""
 import sys, os, re, json, hashlib, time, urllib.request, urllib.error
-import textwrap, shutil, threading, itertools
+import textwrap, shutil, threading, itertools, subprocess
 
 CFG_FILE  = os.path.expanduser("~/.config/tuxaide/config.json")
 CACHE_DIR = os.path.expanduser("~/.config/tuxaide/cache")
@@ -21,6 +21,36 @@ DEFAULTS = {
     "rag_top_k":    1,
     "rag_db_path":  "~/.config/tuxaide/vectordb",
     "rag_timeout":  8,        # seconds before RAG fallback to LLM
+    "enabled":      True,     # persisted by `tuxaide on/off`
+    "prewarm":      "once",   # "off", "once" (at most every keep_alive), "always"
+    "keep_alive":   "10m",    # how long Ollama keeps the model loaded
+    "cache_ttl_days": 30,
+}
+
+def _parse_bool(v):
+    v = v.strip().lower()
+    if v in ("1", "true", "yes", "on"):  return True
+    if v in ("0", "false", "no", "off"): return False
+    raise ValueError("expected true or false")
+
+def _parse_choice(*choices):
+    def parse(v):
+        if v not in choices:
+            raise ValueError(f"expected one of: {', '.join(choices)}")
+        return v
+    return parse
+
+def _parse_model(v):
+    if not re.fullmatch(r"[A-Za-z0-9._:/-]+", v):
+        raise ValueError("model names may only contain letters, digits and . _ : / -")
+    return v
+
+SETTABLE = {
+    "enabled":         _parse_bool,
+    "session_capture": _parse_bool,
+    "color":           _parse_bool,
+    "model":           _parse_model,
+    "prewarm":         _parse_choice("off", "once", "always"),
 }
 
 def cfg():
@@ -31,9 +61,16 @@ def cfg():
     return c
 
 def save_cfg(updates):
-    c = cfg()
+    """Update only the given keys, keeping whatever else the user has in the file."""
+    try:
+        with open(CFG_FILE) as f: c = json.load(f)
+    except Exception:
+        c = {}
     c.update(updates)
-    with open(CFG_FILE, 'w') as f: json.dump(c, f, indent=4)
+    os.makedirs(os.path.dirname(CFG_FILE), exist_ok=True)
+    tmp = CFG_FILE + ".tmp"
+    with open(tmp, 'w') as f: json.dump(c, f, indent=4)
+    os.replace(tmp, CFG_FILE)
 
 class C:
     Z="\033[0m"; B="\033[1m"; D="\033[2m"
@@ -54,7 +91,9 @@ class Spinner:
         sys.stderr.write("\r" + " " * (len(self._msg) + 10) + "\r")
         sys.stderr.flush()
     def start(self): self._t.start(); return self
-    def stop(self):  self._stop.set(); self._t.join()
+    def stop(self):
+        self._stop.set()
+        if self._t.is_alive(): self._t.join()
 
 # ── Question detection ────────────────────────────────────────────────
 KW_PT = ['como faço','como usar','como instalar','como ver','como listar',
@@ -90,10 +129,13 @@ CMDS = {'ls','cd','pwd','mkdir','rm','cp','mv','cat','echo','grep','find',
 # Keywords that signal the question needs local documentation
 RAG_KEYWORDS = {
     'options','flags','man','error','configure','setup','my system',
-    'opções','flags','man','erro','configurar','neste sistema',
-    'options','indicateurs','erreur','configurer','mon système',
+    'opções','erro','configurar','neste sistema',
+    'indicateurs','erreur','configurer','mon système',
     'optionen','fehler','konfigurieren','mein system',
 }
+RAG_KEYWORDS_RE = re.compile(
+    r'\b(?:' + '|'.join(re.escape(k) for k in sorted(RAG_KEYWORDS, key=len, reverse=True)) + r')\b',
+    re.I)
 
 # Destructive command patterns — shown with a warning
 DESTRUCTIVE_PATTERNS = [
@@ -123,19 +165,6 @@ def is_q(text):
         if re.search(r'\b' + re.escape(kw) + r'\b', t, re.I):
             return True
     return t.endswith('?')
-
-def detect_lang(text):
-    t = text.lower()
-    checks = [
-        ("European Portuguese", ['como','porque','porquê','qual','onde','quando','quem','posso']),
-        ("Spanish",             ['cómo','qué','cuál','dónde','cuándo','puedo']),
-        ("French",              ['comment','pourquoi','quel','quelle','où','quand']),
-        ("German",              ['wie','warum','was','welche','können']),
-    ]
-    for lang, kws in checks:
-        for kw in kws:
-            if re.search(r'\b' + kw + r'\b', t): return lang
-    return "English"
 
 def is_context_explain_query(text):
     t = text.strip().lower()
@@ -226,10 +255,16 @@ def normalize(q):
 def cache_key(text):
     return hashlib.md5(text.encode()).hexdigest()
 
-def cache_get(kind, key):
-    """kind: 'answers' or 'embeddings'"""
+def answer_cache_key(norm_q, c):
+    """Answers depend on the model and the configured mode, not just the question."""
+    return cache_key(f"{c.get('model')}|{c.get('mode', 'llm')}|{norm_q}")
+
+def cache_get(kind, key, max_age_days=None):
+    """kind: 'answers' or 'embeddings'. Entries older than max_age_days are ignored."""
     path = os.path.join(CACHE_DIR, kind, key + ".json")
     try:
+        if max_age_days and time.time() - os.path.getmtime(path) > max_age_days * 86400:
+            return None
         with open(path) as f:
             return json.load(f)
     except Exception:
@@ -246,14 +281,16 @@ def cache_set(kind, key, value):
         pass
 
 # ── Performance log ───────────────────────────────────────────────────
-def perf_log(question, mode, t_embed, t_rag, t_llm, cache_hit):
+def perf_log(question, mode, t_embed, t_rag, t_llm, cache_hit, ttft=None):
     try:
         os.makedirs(LOG_DIR, exist_ok=True)
         total = t_embed + t_rag + t_llm
         ts = time.strftime("%Y-%m-%dT%H:%M:%S")
         line = (f"{ts}\t{mode}\t"
                 f"embed={t_embed:.2f}s\trag={t_rag:.2f}s\t"
-                f"llm={t_llm:.2f}s\ttotal={total:.2f}s\t"
+                f"llm={t_llm:.2f}s\t"
+                f"ttft={'-' if ttft is None else f'{ttft:.2f}s'}\t"
+                f"total={total:.2f}s\t"
                 f"cache={'hit' if cache_hit else 'miss'}\t"
                 f"q={question[:80].replace(chr(9),' ')}\n")
         with open(PERF_LOG, "a") as f:
@@ -272,11 +309,9 @@ def detect_command(question):
 
 def should_use_rag(question):
     """Return True if the question likely needs local man page documentation."""
-    t = question.lower()
-    # Explicit RAG keywords
-    for kw in RAG_KEYWORDS:
-        if kw in t:
-            return True
+    # Explicit RAG keywords (whole words only)
+    if RAG_KEYWORDS_RE.search(question):
+        return True
     # Mentions a specific command → probably needs docs
     if detect_command(question):
         return True
@@ -350,7 +385,7 @@ def is_destructive(text):
     return False
 
 # ── Prompt builders ───────────────────────────────────────────────────
-def build_prompt(lang, passages=None):
+def build_prompt(passages=None):
     NL = chr(10)
     base = (
         "You are TuxAide, an assistant specialised EXCLUSIVELY in Linux and Unix systems." + NL +
@@ -358,8 +393,10 @@ def build_prompt(lang, passages=None):
         "system administration, networking, commands, scripts, or Unix/Linux tools. "
         "If the question is NOT about Linux/Unix/terminal, reply with ONE short sentence "
         "only, saying you are a Linux specialist. Do not explain or apologise." + NL +
-        f"MANDATORY LANGUAGE RULE: You MUST reply entirely in {lang}. "
-        f"Every single word must be in {lang}. This rule overrides everything else." + NL
+        "MANDATORY LANGUAGE RULE: Reply entirely in the same language the user wrote "
+        "their question in (the user's question is the text before any [Session context] block). "
+        "If the question mixes languages, use the language of most of its words. "
+        "This rule overrides everything else." + NL
     )
     if passages:
         context = "\n\n".join(
@@ -382,12 +419,15 @@ def build_prompt(lang, passages=None):
     return base
 
 # ── Ollama query ──────────────────────────────────────────────────────
-def ask_ollama(q, c, passages=None):
-    lang = detect_lang(q)
+class OllamaError(Exception):
+    pass
+
+def stream_ollama(q, c, passages=None):
+    """Yield answer text chunks as Ollama generates them. Raises OllamaError."""
     pay = {
         "model": c["model"],
         "messages": [
-            {"role": "system", "content": build_prompt(lang, passages)},
+            {"role": "system", "content": build_prompt(passages)},
             {"role": "user",   "content": q + (
                 "\n\n[Important: end your answer with exactly: Source: <man page name>]"
                 if passages else ""
@@ -396,6 +436,7 @@ def ask_ollama(q, c, passages=None):
         "options": {"temperature": c.get("temperature", 0.1),
                     "num_predict": c.get("max_tokens", 300),
                     "num_gpu": c.get("num_gpu", 99)},
+        "keep_alive": c.get("keep_alive", "10m"),
         "stream": True
     }
     req = urllib.request.Request(
@@ -403,59 +444,151 @@ def ask_ollama(q, c, passages=None):
         data=json.dumps(pay).encode(),
         headers={"Content-Type": "application/json"}, method="POST"
     )
-    out = []
     try:
         with urllib.request.urlopen(req, timeout=60) as r:
             for ln in r:
                 ln = ln.strip()
                 if not ln: continue
-                try: out.append(json.loads(ln).get("message",{}).get("content",""))
-                except Exception: pass
+                try: msg = json.loads(ln)
+                except Exception: continue
+                if msg.get("error"):
+                    raise OllamaError(msg["error"])
+                chunk = msg.get("message", {}).get("content", "")
+                if chunk:
+                    yield chunk
+    except OllamaError:
+        raise
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try: detail = json.loads(e.read()).get("error", "")
+        except Exception: pass
+        raise OllamaError(detail or f"HTTP {e.code}")
     except urllib.error.URLError:
-        return "[Error] Ollama not available. Try: sudo systemctl start ollama"
+        raise OllamaError("Ollama not available. Try: sudo systemctl start ollama")
     except Exception as e:
-        return f"[Error] {e}"
-    return "".join(out).strip()
+        raise OllamaError(str(e) or e.__class__.__name__)
 
 # ── Formatting ────────────────────────────────────────────────────────
-def fmt(text, c, mode="llm", destructive=False):
-    cols  = shutil.get_terminal_size((80,24)).columns
-    color = c.get("color", True)
-    mode_label = f" · Smart RAG" if mode == "smart" else (" · RAG" if mode == "deep" else "")
-    top = (f"{C.Y}{C.B}╭{'─'*(cols-2)}╮{C.Z}" if color else f"┌{'─'*(cols-2)}┐")
-    bot = (f"{C.Y}{C.B}╰{'─'*(cols-2)}╯{C.Z}" if color else f"└{'─'*(cols-2)}┘")
-    lbl = (f"{C.Y}{C.B}╞═ 🐧 TuxAide {C.D}(Ollama · {c['model']}{mode_label}){C.Z}{C.Y}{C.B} ═╡{C.Z}"
-           if color else f"╞═ TuxAide ═╡")
-    out = ["", top, lbl]
-    # Destructive warning — shown before any code block
-    if destructive:
-        warn_line = (
-            f"  {C.RD}{C.B}⚠  WARNING: This command is destructive and irreversible."
-            f" Verify carefully before running.{C.Z}"
-            if color else
-            "  ⚠  WARNING: This command is destructive and irreversible. Verify carefully before running."
-        )
-        out.append("")
-        out.append(warn_line)
-    in_code = False
-    for line in text.split('\n'):
-        if line.startswith('```'):
-            in_code = not in_code
-            lang = line[3:].strip() or "shell"
-            out.append(f"  {C.D}┄ {lang} ┄{C.Z}" if color else f"  ┄ {lang} ┄")
-            continue
-        if in_code:
-            out.append(f"  {C.G}{line}{C.Z}" if color else f"  {line}")
-            continue
+class Renderer:
+    """Incremental formatter: prints the answer box line by line as text streams in.
+
+    Code blocks are buffered until they close so the destructive-command warning
+    can be shown above the block that triggered it.
+    """
+    def __init__(self, c, mode="llm", out=None):
+        self.out   = out or sys.stdout
+        self.color = c.get("color", True)
+        self.model = c.get("model", "")
+        self.mode  = mode
+        self.cols  = max(shutil.get_terminal_size((80, 24)).columns, 24)
+        self.buf   = ""
+        self.code  = None      # list of lines while inside a code block
+        self.code_lang = "shell"
+        self.started = False
+        self.last_blank = True
+
+    def _w(self, line=""):
+        self.out.write(line + "\n")
+        self.out.flush()
+        self.last_blank = not line
+
+    def header(self):
+        if self.started: return
+        self.started = True
+        cols, color = self.cols, self.color
+        mode_label = " · Smart RAG" if self.mode == "smart" else (" · RAG" if self.mode == "deep" else "")
+        self._w()
+        self._w(f"{C.Y}{C.B}╭{'─'*(cols-2)}╮{C.Z}" if color else f"┌{'─'*(cols-2)}┐")
+        self._w(f"{C.Y}{C.B}╞═ 🐧 TuxAide {C.D}(Ollama · {self.model}{mode_label}){C.Z}{C.Y}{C.B} ═╡{C.Z}"
+                if color else "╞═ TuxAide ═╡")
+
+    def feed(self, chunk):
+        self.header()
+        self.buf += chunk
+        while "\n" in self.buf:
+            line, self.buf = self.buf.split("\n", 1)
+            self._line(line)
+
+    def finish(self):
+        self.header()
+        if self.buf:
+            self._line(self.buf)
+            self.buf = ""
+        if self.code is not None:
+            self._flush_code()
+        self._w(f"{C.Y}{C.B}╰{'─'*(self.cols-2)}╯{C.Z}" if self.color else f"└{'─'*(self.cols-2)}┘")
+        self._w()
+
+    def _flush_code(self):
+        color = self.color
+        if is_destructive("\n".join(self.code)):
+            if not self.last_blank:
+                self._w()
+            warning = ("⚠  WARNING: This command is destructive and irreversible."
+                       " Verify carefully before running.")
+            for w in textwrap.wrap(warning, width=self.cols - 4):
+                self._w(f"  {C.RD}{C.B}{w}{C.Z}" if color else f"  {w}")
+        self._w(f"  {C.D}┄ {self.code_lang} ┄{C.Z}" if color else f"  ┄ {self.code_lang} ┄")
+        for line in self.code:
+            self._w(f"  {C.G}{line}{C.Z}" if color else f"  {line}")
+        rule = "┄" * (len(self.code_lang) + 4)
+        self._w(f"  {C.D}{rule}{C.Z}" if color else f"  {rule}")
+        self.code = None
+
+    def _line(self, line):
+        if line.strip().startswith("```"):
+            if self.code is None:
+                self.code = []
+                self.code_lang = line.strip()[3:].strip() or "shell"
+            else:
+                self._flush_code()
+            return
+        if self.code is not None:
+            self.code.append(line)
+            return
         if not line.strip():
-            out.append(""); continue
-        if color:
+            self._w(); return
+        if self.color:
             line = re.sub(r'\*\*(.+?)\*\*', f'{C.B}\\1{C.Z}', line)
             line = re.sub(r'`([^`]+)`', f'{C.G}\\1{C.Z}', line)
-        for w in textwrap.wrap(line, width=cols-4+20, break_long_words=False):
-            out.append(f"  {w}")
-    out += [bot, ""]
-    return "\n".join(out)
+        # Escape codes count towards the width, so coloured lines wrap a little
+        # early but never overflow the terminal.
+        for w in textwrap.wrap(line, width=self.cols - 4, break_long_words=False):
+            self._w(f"  {w}")
+
+def render_text(text, c, mode="llm"):
+    """Render a complete answer (cache hits, messages) in one go."""
+    r = Renderer(c, mode)
+    r.feed(text)
+    r.finish()
+
+def answer_streaming(q, c, passages, mode, spinner):
+    """Stream the answer to the terminal. Returns (answer, ok, ttft)."""
+    r = Renderer(c, mode)
+    parts, ttft, ok = [], None, True
+    t0 = time.time()
+    try:
+        for chunk in stream_ollama(q, c, passages):
+            if ttft is None:
+                ttft = time.time() - t0
+                spinner.stop()
+            parts.append(chunk)
+            r.feed(chunk)
+    except OllamaError as e:
+        ok = False
+        spinner.stop()
+        r.feed(("\n\n" if parts else "") + f"[Error] {e}")
+    except KeyboardInterrupt:
+        ok = False
+        spinner.stop()
+        r.feed("\n\n[Interrupted]")
+    spinner.stop()
+    answer = "".join(parts).strip()
+    if not answer and ok:
+        ok = False
+        r.feed("[Error] Empty answer from the model.")
+    r.finish()
+    return answer, ok, ttft
 
 def ollama_ok(c):
     try:
@@ -473,6 +606,19 @@ def main():
     if mode_arg == "--check":
         sys.exit(0 if is_q(" ".join(sys.argv[2:])) else 1)
 
+    # --set KEY VALUE: persist a config value (used by the shell hook)
+    if mode_arg == "--set":
+        if len(sys.argv) != 4 or sys.argv[2] not in SETTABLE:
+            print(f"Usage: tuxaide --set <{'|'.join(sorted(SETTABLE))}> <value>")
+            sys.exit(2)
+        key, raw = sys.argv[2], sys.argv[3]
+        try:
+            save_cfg({key: SETTABLE[key](raw)})
+        except ValueError as e:
+            print(f"Invalid value for {key}: {e}")
+            sys.exit(2)
+        return
+
     # --explain-last: force contextual explanation from last shell run
     if mode_arg == "--explain-last":
         c = cfg()
@@ -483,14 +629,12 @@ def main():
         last_run = load_last_shell_context()
         if not last_run:
             msg = "No recent shell execution context found in this session. Run a command with: tuxaide run \"<command>\""
-            print(fmt(msg, c, "llm", False))
+            render_text(msg, c, "llm")
             return
         user_q = " ".join(sys.argv[2:]).strip() or default_context_query()
         effective_q = build_contextual_question(user_q, last_run)
         spinner = Spinner().start()
-        answer = ask_ollama(effective_q, c, None)
-        spinner.stop()
-        print(fmt(answer, c, "llm", is_destructive(answer)))
+        answer_streaming(effective_q, c, None, "llm", spinner)
         return
 
     # mode: switch between llm, smart, deep (rag kept as alias for deep)
@@ -518,13 +662,13 @@ def main():
             print("Usage: tuxaide index <command>  (e.g. tuxaide index nginx)")
             return
         print(f"🐧 Indexing man page for: {cmd}")
-        os.system(f"tuxaide-index {cmd}")
+        subprocess.run(["tuxaide-index", cmd])
         return
 
     # reindex: re-index all man pages
     if mode_arg == "reindex":
         print("🐧 Re-indexing all man pages...")
-        os.system("tuxaide-index --all")
+        subprocess.run(["tuxaide-index", "--all"])
         return
 
     # timing: show last N lines of perf log
@@ -561,20 +705,21 @@ def main():
         effective_q = build_contextual_question(q, last_run)
 
     norm_q    = normalize(effective_q if context_query else q)
-    ans_key   = cache_key(norm_q)
+    ans_key   = answer_cache_key(norm_q, c)
     t_embed   = 0.0
     t_rag     = 0.0
     t_llm     = 0.0
     cache_hit = False
 
     # ── Answer cache lookup ───────────────────────────────────────────
-    cached_answer = None if context_query else cache_get("answers", ans_key)
-    if cached_answer:
+    cached_answer = None if context_query else cache_get(
+        "answers", ans_key, c.get("cache_ttl_days", 30))
+    if cached_answer and cached_answer.get("answer"):
         cache_hit = True
         answer    = cached_answer["answer"]
         act_mode  = cached_answer.get("mode", "llm")
         perf_log(norm_q, act_mode + "+cache", 0, 0, 0, True)
-        print(fmt(answer, c, act_mode, is_destructive(answer)))
+        render_text(answer, c, act_mode)
         return
 
     # ── Determine mode and whether to use RAG ────────────────────────
@@ -619,21 +764,16 @@ def main():
         if passages:
             act_mode = "deep"
 
-    # ── LLM call ──────────────────────────────────────────────────────
+    # ── LLM call, streamed straight to the terminal ───────────────────
     t_llm_start = time.time()
-    answer = ask_ollama(effective_q, c, passages if passages else None)
+    answer, ok, ttft = answer_streaming(
+        effective_q, c, passages if passages else None, act_mode, spinner)
     t_llm = time.time() - t_llm_start
 
-    spinner.stop()
-
-    # ── Cache the answer ──────────────────────────────────────────────
-    if not context_query:
+    # ── Cache the answer (never errors or partial answers) ────────────
+    if ok and not context_query:
         cache_set("answers", ans_key, {"answer": answer, "mode": act_mode})
 
-    # ── Perf log ──────────────────────────────────────────────────────
-    perf_log(norm_q, act_mode, t_embed, t_rag, t_llm, False)
-
-    # ── Output ────────────────────────────────────────────────────────
-    print(fmt(answer, c, act_mode, is_destructive(answer)))
+    perf_log(norm_q, act_mode, t_embed, t_rag, t_llm, False, ttft)
 
 if __name__ == "__main__": main()

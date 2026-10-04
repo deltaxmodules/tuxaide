@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """TuxAide — Man page indexer for Smart RAG mode."""
-import os, sys, json, re, subprocess, urllib.request
+import os, sys, json, re, subprocess, urllib.request, urllib.error
 
 try:
     import chromadb
@@ -10,6 +10,7 @@ except ImportError:
 
 CFG_FILE = os.path.expanduser("~/.config/tuxaide/config.json")
 DB_PATH  = os.path.expanduser("~/.config/tuxaide/vectordb")
+BATCH    = 32   # chunks embedded per request
 
 # Top 100 most useful man pages for Linux beginners
 TOP_COMMANDS = [
@@ -29,6 +30,7 @@ TOP_COMMANDS = [
     "nginx","apache2","mysql","postgresql","redis","crontab","env","export",
     "set","alias","history","source","bash","sh","awk","xargs","tee","tty"
 ]
+TOP_COMMANDS = list(dict.fromkeys(TOP_COMMANDS))  # drop duplicates, keep order
 
 def load_config():
     try:
@@ -53,7 +55,16 @@ def get_man_text(cmd):
     except Exception:
         return None
 
-def chunk_text(text, cmd, chunk_size=200, overlap=40):
+def man_section(cmd):
+    """Section of the man page that `man cmd` shows, e.g. '1' or '8'. Defaults to '1'."""
+    try:
+        path = subprocess.run(["man", "-w", cmd], capture_output=True, text=True).stdout.strip()
+        m = re.search(r"\.(\d\w*)(?:\.(?:gz|bz2|xz|z|Z))?$", path.splitlines()[0]) if path else None
+        return m.group(1) if m else "1"
+    except Exception:
+        return "1"
+
+def chunk_text(text, cmd, chunk_size=200, overlap=40, section="1"):
     """Split text into overlapping chunks (smaller = faster retrieval)."""
     words = text.split()
     chunks = []
@@ -62,7 +73,7 @@ def chunk_text(text, cmd, chunk_size=200, overlap=40):
         chunk_words = words[i:i+chunk_size]
         chunks.append({
             "text": " ".join(chunk_words),
-            "source": f"man {cmd}(1)",
+            "source": f"man {cmd}({section})",
             "command": cmd,
             "chunk_idx": len(chunks)
         })
@@ -78,30 +89,58 @@ def embed_text(text, model, url):
     with urllib.request.urlopen(req, timeout=30) as r:
         return json.loads(r.read())["embedding"]
 
-def index_command(cmd, col, cfg, verbose=True):
+_BATCH_API = True
+
+def embed_batch(texts, model, url):
+    """Embed many texts in one request (/api/embed); fall back to one request each
+    on Ollama versions without the batch endpoint."""
+    global _BATCH_API
+    if _BATCH_API:
+        req = urllib.request.Request(
+            f"{url}/api/embed",
+            data=json.dumps({"model": model, "input": texts}).encode(),
+            headers={"Content-Type": "application/json"}, method="POST"
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=120) as r:
+                return json.loads(r.read())["embeddings"]
+        except urllib.error.HTTPError as e:
+            if e.code != 404:
+                raise
+            _BATCH_API = False
+    return [embed_text(t, model, url) for t in texts]
+
+def index_command(cmd, col, cfg, verbose=True, prefix=""):
     text = get_man_text(cmd)
     if not text:
-        if verbose: print(f"  ⚠  No man page: {cmd}")
+        if verbose: print(f"  {prefix}⚠  No man page: {cmd}")
         return 0
-    chunks = chunk_text(text, cmd)
-    for i, chunk in enumerate(chunks):
-        chunk_id = f"{cmd}_{i}"
+    chunks = chunk_text(text, cmd, section=man_section(cmd))
+    ids = [f"{cmd}_{i}" for i in range(len(chunks))]
+    try:
+        existing = set(col.get(ids=ids)["ids"])
+    except Exception:
+        existing = set()
+    todo = [(cid, ch) for cid, ch in zip(ids, chunks) if cid not in existing]
+    model = cfg.get("embed_model", "nomic-embed-text")
+    url = cfg.get("ollama_url", "http://localhost:11434")
+    for b in range(0, len(todo), BATCH):
+        batch = todo[b:b + BATCH]
         try:
-            existing = col.get(ids=[chunk_id])
-            if existing["ids"]: continue
-        except Exception: pass
-        try:
-            vec = embed_text(chunk["text"], cfg.get("embed_model","nomic-embed-text"),
-                            cfg.get("ollama_url","http://localhost:11434"))
+            vecs = embed_batch([ch["text"] for _, ch in batch], model, url)
             col.add(
-                ids=[chunk_id],
-                embeddings=[vec],
-                documents=[chunk["text"]],
-                metadatas=[{"source": chunk["source"], "command": cmd, "chunk": i}]
+                ids=[cid for cid, _ in batch],
+                embeddings=vecs,
+                documents=[ch["text"] for _, ch in batch],
+                metadatas=[{"source": ch["source"], "command": cmd, "chunk": ch["chunk_idx"]}
+                           for _, ch in batch]
             )
         except Exception as e:
-            if verbose: print(f"  ✗ Error embedding {cmd}: {e}")
-    if verbose: print(f"  ✓  {cmd} ({len(chunks)} chunks)")
+            if verbose: print(f"  {prefix}✗  Error embedding {cmd}: {e}")
+            return 0
+    if verbose:
+        note = f", {len(existing)} already indexed" if existing else ""
+        print(f"  {prefix}✓  {cmd} ({len(chunks)} chunks{note})")
     return len(chunks)
 
 def main():
@@ -124,8 +163,9 @@ def main():
     print(f"   Database: {DB_PATH}")
     print()
     total = 0
-    for cmd in TOP_COMMANDS:
-        n = index_command(cmd, col, cfg)
+    width = len(str(len(TOP_COMMANDS)))
+    for i, cmd in enumerate(TOP_COMMANDS, 1):
+        n = index_command(cmd, col, cfg, prefix=f"[{i:>{width}}/{len(TOP_COMMANDS)}] ")
         total += n
     print()
     print(f"✓ Indexing complete — {total} total chunks stored")

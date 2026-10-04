@@ -1,9 +1,27 @@
 # ── TuxAide hook ── loaded by ~/.bashrc / ~/.zshrc ─────────────────
 _LG="${HOME}/.local/bin/tuxaide"
-_LG_ON=true
 _TUX_CFG="${HOME}/.config/tuxaide/config.json"
 _TUX_SESSION_WRITER="${HOME}/.config/tuxaide/session_writer.py"
 _TUX_SESSION_FILE="${HOME}/.config/tuxaide/session.json"
+
+# Read the settings the hook needs at load time in a single python3 call.
+_tux_load_cfg() {
+    python3 - "$_TUX_CFG" <<'PYEOF' 2>/dev/null
+import json, sys
+try:
+    with open(sys.argv[1]) as f: c = json.load(f)
+except Exception:
+    c = {}
+print("true" if c.get("enabled", True) else "false",
+      c.get("prewarm", "once"),
+      c.get("keep_alive", "10m"),
+      c.get("model", "qwen2.5-coder:7b"),
+      c.get("ollama_url", "http://localhost:11434"))
+PYEOF
+}
+read -r _LG_ON _TUX_PREWARM _TUX_KEEP_ALIVE _TUX_MODEL _TUX_OLLAMA_URL <<CFGEOF
+$(_tux_load_cfg || echo "true once 10m qwen2.5-coder:7b http://localhost:11434")
+CFGEOF
 
 _tux_session_capture_enabled() {
     python3 -c "import json,os; c=json.load(open(os.path.expanduser('${_TUX_CFG}'))); print(str(bool(c.get('session_capture', False))).lower())" 2>/dev/null
@@ -88,8 +106,16 @@ tuxaide() {
         return
     }
     case "$1" in
-        on)      _LG_ON=true;  echo "🐧 TuxAide ENABLED" ;;
-        off)     _LG_ON=false; echo "🐧 TuxAide DISABLED" ;;
+        on)
+            _LG_ON=true
+            "$_LG" --set enabled true
+            echo "🐧 TuxAide ENABLED"
+            ;;
+        off)
+            _LG_ON=false
+            "$_LG" --set enabled false
+            echo "🐧 TuxAide DISABLED (also in new terminals — 'tuxaide on' to re-enable)"
+            ;;
         status)
             local mode capture
             mode=$(python3 -c "import json,os; c=json.load(open(os.path.expanduser('~/.config/tuxaide/config.json'))); print(c.get('mode','llm').upper())" 2>/dev/null || echo "LLM")
@@ -103,20 +129,14 @@ tuxaide() {
         model|modelo)
             local m="${2:-}"
             [[ -z "$m" ]] && { echo "Usage: tuxaide model <name>"; return; }
-            python3 -c "
-import json,os
-f=os.path.expanduser('~/.config/tuxaide/config.json')
-with open(f) as fp: c=json.load(fp)
-c['model']='$m'
-with open(f,'w') as fp: json.dump(c,fp,indent=4)
-print('🐧 Model changed to: $m')
-"       ;;
+            "$_LG" --set model "$m" && echo "🐧 Model changed to: $m"
+            ;;
         mode|index|reindex|--timing) "$_LG" "$@" ;;
         *) "$_LG" --ask "$*" ;;
     esac
 }
-alias tux='tuxaide'
-alias lg='tuxaide'
+# Short alias, only if 'tux' isn't already taken by something else.
+type tux >/dev/null 2>&1 || alias tux='tuxaide'
 
 # ── Automatic hook via command_not_found_handle ────────────────────
 command_not_found_handle() {
@@ -160,8 +180,25 @@ if [[ -n "${ZSH_VERSION:-}" ]]; then
 fi
 
 # ── Pre-warm Ollama model on session start ─────────────────────────
-# Keeps the model loaded in RAM so first query is faster
-(sleep 4 && curl -s -X POST http://localhost:11434/api/generate \
-    -d "{\"model\":\"$(python3 -c "import json,os; c=json.load(open(os.path.expanduser('~/.config/tuxaide/config.json'))); print(c.get('model','qwen2.5-coder:7b'))" 2>/dev/null || echo 'qwen2.5-coder:7b')\",\"prompt\":\"ok\",\"stream\":false}" \
-    >/dev/null 2>&1 &)
+# Loads the model into RAM so the first question is faster.
+#   prewarm=off     never
+#   prewarm=once    at most once per 10 minutes, however many terminals open
+#   prewarm=always  every new shell
+# An empty prompt only loads the model; keep_alive sets how long it stays loaded.
+_tux_prewarm() {
+    [[ "$_LG_ON" == "true" ]] || return 0
+    case "$_TUX_PREWARM" in
+        off) return 0 ;;
+        always) ;;
+        *)
+            local marker="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/tuxaide-prewarm-$(id -u)"
+            [[ -n "$(find "$marker" -mmin -10 2>/dev/null)" ]] && return 0
+            touch "$marker" 2>/dev/null
+            ;;
+    esac
+    (sleep 2 && curl -s -m 120 -X POST "${_TUX_OLLAMA_URL}/api/generate" \
+        -d "{\"model\":\"${_TUX_MODEL}\",\"keep_alive\":\"${_TUX_KEEP_ALIVE}\"}" \
+        >/dev/null 2>&1 &)
+}
+_tux_prewarm
 # ──────────────────────────────────────────────────────────────────

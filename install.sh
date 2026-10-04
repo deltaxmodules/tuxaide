@@ -481,22 +481,46 @@ install_agent() {
     local mode_val="llm"
     [[ "$INSTALL_RAG" == "true" ]] && mode_val="smart"
 
-    cat > "${CFG}/config.json" << JEOF
-{
+    # Keeping a resident 4.7 GB model warm on small machines hurts more than it helps.
+    local prewarm_val="once"
+    [[ $RAM_GB -lt 8 ]] && prewarm_val="off"
+
+    # Merge with any existing config: settings the user already has win,
+    # new keys get these defaults. Values are passed as arguments, not interpolated.
+    local cfg_msg
+    cfg_msg=$(python3 - "${CFG}/config.json" "$MODEL" "$mode_val" "$prewarm_val" <<'PYEOF'
+import json, os, sys
+path, model, mode, prewarm = sys.argv[1:5]
+defaults = {
     "ollama_url": "http://localhost:11434",
-    "model": "${MODEL}",
+    "model": model,
     "embed_model": "nomic-embed-text",
     "max_tokens": 300,
     "temperature": 0.1,
-    "color": true,
-    "mode": "${mode_val}",
-    "session_capture": true,
+    "color": True,
+    "mode": mode,
+    "session_capture": True,
     "rag_top_k": 1,
     "rag_timeout": 8,
-    "rag_db_path": "~/.config/tuxaide/vectordb"
+    "rag_db_path": "~/.config/tuxaide/vectordb",
+    "enabled": True,
+    "prewarm": prewarm,
+    "keep_alive": "10m",
+    "cache_ttl_days": 30,
 }
-JEOF
-    ok "Config → ${CFG}/config.json  (mode: ${mode_val})"
+existing = {}
+try:
+    with open(path) as f: existing = json.load(f)
+except Exception:
+    pass
+merged = {**defaults, **existing}
+tmp = path + ".tmp"
+with open(tmp, "w") as f: json.dump(merged, f, indent=4)
+os.replace(tmp, path)
+print(f"kept existing settings, mode: {merged['mode']}" if existing else f"mode: {merged['mode']}")
+PYEOF
+) || err "Failed to write ${CFG}/config.json"
+    ok "Config → ${CFG}/config.json  (${cfg_msg})"
 
     fetch_component "hook.sh" "${CFG}/hook.sh" "$SRC_DIR" || err "Failed to fetch hook.sh"
     ok "Hook installed → ${CFG}/hook.sh"

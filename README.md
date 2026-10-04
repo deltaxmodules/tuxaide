@@ -175,6 +175,18 @@ tuxaide index nginx
 tuxaide-uninstall
 ```
 
+`tuxaide on` / `tuxaide off` are remembered across new terminals.
+
+### Configuration
+
+Settings live in `~/.config/tuxaide/config.json`. Reinstalling keeps your existing values.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `prewarm` | `once` (`off` below 8 GB RAM) | Load the model when a shell opens: `off`, `once` (at most every 10 min), `always` |
+| `keep_alive` | `10m` | How long Ollama keeps the model in memory after a question |
+| `cache_ttl_days` | `30` | Cached answers older than this are ignored |
+
 ---
 
 ## Shell Error Context (v2.2)
