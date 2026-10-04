@@ -24,11 +24,12 @@ print("true" if c.get("enabled", True) else "false",
       c.get("prewarm", "once"),
       c.get("keep_alive", "10m"),
       c.get("model", "qwen2.5-coder:7b"),
-      c.get("ollama_url", "http://localhost:11434"))
+      c.get("ollama_url", "http://localhost:11434"),
+      "true" if c.get("failure_hint", True) else "false")
 PYEOF
 }
-read -r _LG_ON _TUX_PREWARM _TUX_KEEP_ALIVE _TUX_MODEL _TUX_OLLAMA_URL <<CFGEOF
-$(_tux_load_cfg || echo "true once 10m qwen2.5-coder:7b http://localhost:11434")
+read -r _LG_ON _TUX_PREWARM _TUX_KEEP_ALIVE _TUX_MODEL _TUX_OLLAMA_URL _TUX_FAILURE_HINT <<CFGEOF
+$(_tux_load_cfg || echo "true once 10m qwen2.5-coder:7b http://localhost:11434 true")
 CFGEOF
 
 _tux_session_capture_enabled() {
@@ -109,6 +110,7 @@ tuxaide() {
     [[ -z "${1:-}" ]] && {
         echo "🐧 TuxAide v2.1"
         echo "   tuxaide <question>            — ask a question"
+        echo "   ?  [question]                 — explain why the last command failed"
         echo "   tuxaide on / off              — enable / disable hook"
         echo "   tuxaide status                — show status and mode"
         echo "   tuxaide mode [llm|smart|deep] — switch knowledge mode"
@@ -140,6 +142,10 @@ tuxaide() {
             shift
             _tux_run "$@"
             ;;
+        why)
+            shift
+            _tux_agent --why "${_TUX_LAST_CMD:-}" "${_TUX_LAST_RC:-}" "$@"
+            ;;
         model|modelo)
             local m="${2:-}"
             [[ -z "$m" ]] && { echo "Usage: tuxaide model <name>"; return; }
@@ -151,6 +157,9 @@ tuxaide() {
 }
 # Short alias, only if 'tux' isn't already taken by something else.
 type tux >/dev/null 2>&1 || alias tux='tuxaide'
+# `?` explains the last command. An alias is expanded before globbing, so a
+# one-character file in the current folder can't hijack it.
+if [[ -n "${ZSH_VERSION:-}" ]]; then alias '?'='noglob tuxaide why'; else alias '?'='tuxaide why'; fi
 
 # ── Put a command chosen in the answer menu on the prompt ──────────
 # zsh: straight into the edit buffer. bash can't pre-fill the prompt from a
@@ -168,10 +177,56 @@ _tux_take_pending() {
         history -s -- "$cmd"
     fi
 }
+
+# ── Remember the last command, hint after a failure ────────────────
+# Only the command line and its exit code are kept, in shell variables —
+# never its output. `?` re-runs it (read-only commands, or after asking)
+# when it needs to see the error.
+_TUX_LAST_CMD=""
+_TUX_LAST_RC=0
+_tux_record() {
+    local cmd="$1" rc="$2"
+    # The not-found handler marks lines it answered as questions: those
+    # aren't commands, so `?` keeps pointing at the real one before them.
+    if [[ -f "${_TUX_PENDING_DIR}/$$.asked" ]]; then
+        rm -f "${_TUX_PENDING_DIR}/$$.asked"
+        return
+    fi
+    case "$cmd" in
+        "?"|"? "*|"tuxaide why"*|"tux why"*) return ;;
+    esac
+    _TUX_LAST_CMD="$cmd"
+    _TUX_LAST_RC="$rc"
+    [[ "$_LG_ON" == "true" && "$_TUX_FAILURE_HINT" == "true" ]] || return
+    case "$rc" in
+        0|130|141|148) ;;   # success, Ctrl+C, broken pipe, Ctrl+Z
+        *) printf '\033[2m💡 exit %s — type ? to ask TuxAide why\033[0m\n' "$rc" >&2 ;;
+    esac
+}
+
 if [[ -n "${BASH_VERSION:-}" ]]; then
+    _TUX_HISTCMD=""
+    _tux_precmd() {
+        local rc=$?
+        # HISTCMD only moves when a new command ran (not on an empty Enter).
+        if [[ -n "$_TUX_HISTCMD" && "$HISTCMD" != "$_TUX_HISTCMD" ]]; then
+            # `history 1` ("  42  cmd"), not `fc -ln -1`: inside PROMPT_COMMAND
+            # fc lags one entry behind after some lines (e.g. an alias).
+            local last
+            last="$(HISTTIMEFORMAT='' history 1 2>/dev/null)"
+            last="${last#"${last%%[![:space:]]*}"}"   # leading spaces
+            last="${last#"${last%%[![:digit:]]*}"}"   # history number
+            last="${last#\*}"                         # "modified" marker
+            last="${last#"${last%%[![:space:]]*}"}"
+            _tux_record "$last" "$rc"
+        fi
+        _tux_take_pending
+        _TUX_HISTCMD="$HISTCMD"
+        return $rc
+    }
     case "${PROMPT_COMMAND:-}" in
-        *_tux_take_pending*) ;;
-        *) PROMPT_COMMAND="_tux_take_pending${PROMPT_COMMAND:+; $PROMPT_COMMAND}" ;;
+        *_tux_precmd*) ;;
+        *) PROMPT_COMMAND="_tux_precmd${PROMPT_COMMAND:+; $PROMPT_COMMAND}" ;;
     esac
 fi
 
@@ -186,6 +241,9 @@ command_not_found_handle() {
     full_cmd=$(HISTTIMEFORMAT="" history 1 2>/dev/null | sed 's/^ *[0-9]* *//')
     local question="${full_cmd:-$*}"
     if _tux_should_handle_question_line "$question"; then
+        mkdir -p "$_TUX_PENDING_DIR" && : > "${_TUX_PENDING_DIR}/$$.asked"
+        # This handler runs in a subshell, so exporting here doesn't leak.
+        export TUXAIDE_LAST_CMD="$_TUX_LAST_CMD" TUXAIDE_LAST_RC="$_TUX_LAST_RC"
         _tux_agent --ask "$question"
         return 0
     fi
@@ -198,17 +256,30 @@ command_not_found_handle() {
 if [[ -n "${ZSH_VERSION:-}" ]]; then
     # Allow natural-language questions ending with '?' without glob errors.
     setopt NO_NOMATCH 2>/dev/null
-    _lg_preexec() {
-        return
+    _TUX_RAN=""
+    _tux_preexec() {
+        _TUX_RAN="$1"
+    }
+    _tux_precmd() {
+        local rc=$?
+        if [[ -n "$_TUX_RAN" ]]; then
+            _tux_record "$_TUX_RAN" "$rc"
+            _TUX_RAN=""
+        fi
+        _tux_take_pending
+        return $rc
     }
     autoload -Uz add-zsh-hook 2>/dev/null
-    add-zsh-hook preexec _lg_preexec 2>/dev/null
-    add-zsh-hook precmd _tux_take_pending 2>/dev/null
+    add-zsh-hook preexec _tux_preexec 2>/dev/null
+    add-zsh-hook precmd _tux_precmd 2>/dev/null
 
     command_not_found_handler() {
         local cmd="$1"
         local line="$*"
         if _tux_should_handle_question_line "$line"; then
+            mkdir -p "$_TUX_PENDING_DIR" && : > "${_TUX_PENDING_DIR}/$$.asked"
+            # This handler runs in a subshell, so exporting here doesn't leak.
+            export TUXAIDE_LAST_CMD="$_TUX_LAST_CMD" TUXAIDE_LAST_RC="$_TUX_LAST_RC"
             noglob "$_LG" --ask "$line"
             return 0
         fi

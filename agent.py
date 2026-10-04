@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """TuxAide v2.1 — Local AI assistant for Linux terminal with Smart RAG."""
 import sys, os, re, json, hashlib, time, urllib.request, urllib.error
-import textwrap, shutil, threading, itertools, subprocess, base64, select
+import textwrap, shutil, threading, itertools, subprocess, base64, select, shlex
 
 CFG_FILE  = os.path.expanduser("~/.config/tuxaide/config.json")
 CACHE_DIR = os.path.expanduser("~/.config/tuxaide/cache")
@@ -27,6 +27,7 @@ DEFAULTS = {
     "keep_alive":   "10m",    # how long Ollama keeps the model loaded
     "cache_ttl_days": 30,
     "action_menu":  True,     # after an answer: put a command on the prompt / copy it
+    "failure_hint": True,     # after a failed command, hint that `?` explains it
 }
 
 def _parse_bool(v):
@@ -54,6 +55,7 @@ SETTABLE = {
     "model":           _parse_model,
     "prewarm":         _parse_choice("off", "once", "always"),
     "action_menu":     _parse_bool,
+    "failure_hint":    _parse_bool,
 }
 
 def cfg():
@@ -214,6 +216,158 @@ class ContextIntentDetector:
         if not session_capture_enabled or not has_last_run:
             return False
         return cls.looks_like_context_followup(text)
+
+# ── Explain the last command (`?` / `tuxaide why`) ────────────────────
+# Re-running is the only way to see the error text (the hook records the
+# command and exit code, never output). Only read-only commands are re-run
+# without asking; anything else needs an explicit "y".
+SAFE_RERUN = {
+    "ls", "cat", "head", "tail", "grep", "egrep", "fgrep", "rg", "find", "stat",
+    "file", "wc", "du", "df", "which", "type", "whereis", "id", "groups", "whoami",
+    "uname", "hostname", "free", "uptime", "ss", "dig", "nslookup", "host",
+    "readlink", "realpath", "tree", "printenv", "date", "diff", "cmp",
+    "md5sum", "sha256sum", "lsblk", "blkid", "getent", "test", "[",
+}
+SAFE_SUBCOMMANDS = {
+    "git":       {"status", "log", "diff", "show", "branch", "remote", "rev-parse", "ls-files", "blame"},
+    "systemctl": {"status", "is-active", "is-enabled", "is-failed", "cat", "list-units", "show"},
+    "docker":    {"ps", "images", "inspect", "logs", "version", "info"},
+    "apt":       {"list", "show", "search", "policy"},
+    "brew":      {"list", "info", "search"},
+    "pip":       {"list", "show"}, "pip3": {"list", "show"},
+    "npm":       {"ls", "list", "view"},
+    "kubectl":   {"get", "describe", "logs"},
+}
+INTERACTIVE = {
+    "vim", "vi", "nvim", "nano", "emacs", "less", "more", "man", "top", "htop", "ssh",
+    "tmux", "screen", "mysql", "psql", "sqlite3", "ftp", "sftp", "watch", "telnet",
+}
+REPL_WITHOUT_ARGS = {"python", "python3", "node", "irb", "bash", "zsh", "sh"}
+UNSAFE_SHELL = re.compile(r"[;&|<>`]|\$\(")
+RERUN_TIMEOUT = 10
+
+def _cmd_words(cmd):
+    try:
+        words = shlex.split(cmd)
+    except ValueError:
+        return []
+    while words and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0]):  # FOO=bar cmd
+        words = words[1:]
+    return words
+
+def rerun_policy(cmd):
+    """'safe' (re-run silently), 'ask' (re-run only after y) or 'never' (interactive)."""
+    words = _cmd_words(cmd)
+    if not words:
+        return "ask"
+    w0 = os.path.basename(words[0])
+    if (w0 in INTERACTIVE or (w0 in REPL_WITHOUT_ARGS and len(words) == 1)
+            or (w0 == "tail" and any(a.startswith("-f") or a == "-F" for a in words))):
+        return "never"
+    if UNSAFE_SHELL.search(cmd):
+        return "ask"
+    if w0 in SAFE_SUBCOMMANDS:
+        return "safe" if len(words) > 1 and words[1] in SAFE_SUBCOMMANDS[w0] else "ask"
+    if w0 == "find" and any(a in ("-delete", "-exec", "-execdir", "-ok", "-okdir",
+                                  "-fprint", "-fprint0", "-fprintf", "-fls") for a in words):
+        return "ask"
+    return "safe" if w0 in SAFE_RERUN else "ask"
+
+def _clip_lines(text, head=20, tail=60):
+    lines = text.splitlines()
+    if len(lines) <= head + tail:
+        return text, False
+    return "\n".join(lines[:head] + [f"[... {len(lines) - head - tail} lines omitted ...]"] + lines[-tail:]), True
+
+def rerun_capture(cmd):
+    """Run cmd non-interactively in the user's shell; return (stdout, stderr, rc, truncated)."""
+    shell = os.environ.get("SHELL") or "/bin/sh"
+    if os.path.basename(shell) not in ("bash", "zsh", "sh", "dash", "ksh"):
+        shell = "/bin/sh"
+    # zsh reads ~/.zshenv even for -c; -f skips it so its noise can't end up
+    # in the captured error.
+    argv = [shell, "-f", "-c", cmd] if os.path.basename(shell) == "zsh" else [shell, "-c", cmd]
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True, errors="replace",
+                           stdin=subprocess.DEVNULL, timeout=RERUN_TIMEOUT)
+        out, err, rc = p.stdout, p.stderr, p.returncode
+    except subprocess.TimeoutExpired as e:
+        dec = lambda b: (b.decode(errors="replace") if isinstance(b, bytes) else (b or ""))
+        out, err, rc = dec(e.stdout), dec(e.stderr) + f"\n[stopped after {RERUN_TIMEOUT}s]", None
+    out, t1 = _clip_lines(out)
+    err, t2 = _clip_lines(err)
+    return out, err, rc, (t1 or t2)
+
+# `?` with no words: ask in the user's locale language, so the answer comes
+# back in it (the model replies in the language of the question).
+WHY_QUESTION = {
+    "en": "Why did this command fail, and how do I fix it? Give the corrected command if there is one.",
+    "pt": "Porque é que este comando falhou e como o corrijo? Indica o comando corrigido, se houver. Responde em português.",
+    "es": "¿Por qué falló este comando y cómo lo soluciono? Da el comando corregido si lo hay. Responde en español.",
+    "fr": "Pourquoi cette commande a-t-elle échoué et comment la corriger ? Donne la commande corrigée s'il y en a une. Réponds en français.",
+    "de": "Warum ist dieser Befehl fehlgeschlagen und wie behebe ich das? Gib den korrigierten Befehl an, falls es einen gibt. Antworte auf Deutsch.",
+    "it": "Perché questo comando è fallito e come lo risolvo? Indica il comando corretto, se esiste. Rispondi in italiano.",
+}
+
+def default_why_question():
+    loc = (os.environ.get("LC_ALL") or os.environ.get("LC_MESSAGES") or os.environ.get("LANG") or "")
+    return WHY_QUESTION.get(loc[:2].lower(), WHY_QUESTION["en"])
+
+def ask_yes(prompt, timeout=20):
+    """y/N question on the terminal. False when there's no terminal."""
+    if not (sys.stdout.isatty() and sys.stdin.isatty()):
+        return False
+    try:
+        with open("/dev/tty", "r+b", buffering=0) as tty:
+            try:
+                key = read_key(tty, timeout, f"\r\033[K  {prompt}".encode())
+            except KeyboardInterrupt:
+                key = ""
+            tty.write(b"\r\033[K"); tty.flush()
+            return key.lower() == "y"
+    except OSError:
+        return False
+
+def explain_last_command(c, cmd, rc, user_q=""):
+    """`?`: explain the last command, re-running it (when safe or allowed) to see its error."""
+    if not cmd:
+        render_text("Nothing to explain yet. Run a command first, then type `?`.", c)
+        return
+    try: rc = int(rc)
+    except (TypeError, ValueError): rc = None
+    if rc == 0 and not user_q:
+        render_text(f"The last command succeeded (exit 0):\n\n```text\n{cmd}\n```\n\n"
+                    "Ask something about it with: `? <your question>`", c)
+        return
+
+    policy = rerun_policy(cmd)
+    run_it = policy == "safe" or (
+        policy == "ask" and ask_yes(f"{C.D}Re-run {C.Z}{cmd}{C.D} to read its error? [y/N]{C.Z}"))
+    stdout = stderr = ""
+    truncated, rerun_rc = False, None
+    if run_it:
+        sys.stderr.write(f"  {C.D}re-running: {cmd}{C.Z}\n"); sys.stderr.flush()
+        stdout, stderr, rerun_rc, truncated = rerun_capture(cmd)
+    elif policy == "never":
+        stderr = "(interactive program: output was not captured)"
+    else:
+        stderr = "(output not captured: explain from the command and exit code)"
+
+    question = user_q or default_why_question()
+    if not run_it:
+        # Said next to the question, or small models just ask for the error text.
+        question += ("\n(This is about a shell command that failed on the user's system. Its error "
+                     "output isn't available, so don't ask for it: list the most likely causes for "
+                     "this command and exit code, and how to check each one.)")
+    run = {"command": cmd, "exit_code": rc, "stdout": stdout, "stderr": stderr,
+           "output_truncated": truncated}
+    effective_q = build_contextual_question(question, run)
+    if run_it and rerun_rc is not None and rerun_rc != rc:
+        effective_q += f"\n(Note: when re-run just now it exited with {rerun_rc}.)\n"
+
+    spinner = Spinner().start()
+    _, ok, _, commands = answer_streaming(effective_q, c, None, "llm", spinner)
+    action_menu(commands, c)
 
 def default_context_query():
     return "Explain the last shell command output and error in simple terms. Identify cause and suggest next step."
@@ -789,6 +943,18 @@ def main():
         action_menu(commands, c)
         return
 
+    # --why CMD RC [QUESTION...]: explain the last command (the `?` alias)
+    if mode_arg == "--why":
+        c = cfg()
+        if not ollama_ok(c):
+            print(f"\n{C.O}⚠ Ollama not available.{C.Z}")
+            print(f"{C.D}  Try: sudo systemctl start ollama{C.Z}\n")
+            return
+        cmd = sys.argv[2] if len(sys.argv) > 2 else ""
+        rc  = sys.argv[3] if len(sys.argv) > 3 else ""
+        explain_last_command(c, cmd.strip(), rc, " ".join(sys.argv[4:]).strip())
+        return
+
     # mode: switch between llm, smart, deep (rag kept as alias for deep)
     if mode_arg == "mode":
         if len(sys.argv) < 3:
@@ -846,6 +1012,15 @@ def main():
         print(f"\n{C.O}⚠ Ollama not available.{C.Z}")
         print(f"{C.D}  Try: sudo systemctl start ollama{C.Z}\n")
         sys.exit(0)
+
+    # "why did this fail?" right after a failed command → same as `?`
+    shell_cmd = os.environ.get("TUXAIDE_LAST_CMD", "").strip()
+    shell_rc  = os.environ.get("TUXAIDE_LAST_RC", "")
+    if (shell_cmd and shell_rc not in ("", "0")
+            and not re.match(r"(tuxaide|tux)\s+run\b", shell_cmd)
+            and ContextIntentDetector.looks_like_context_followup(q)):
+        explain_last_command(c, shell_cmd, shell_rc, q)
+        return
 
     effective_q = q
     last_run = load_last_shell_context() if c.get("session_capture", False) else None

@@ -555,6 +555,8 @@ defaults = {
     "prewarm": prewarm,
     "keep_alive": "10m",
     "cache_ttl_days": 30,
+    "action_menu": True,
+    "failure_hint": True,
 }
 existing = {}
 try:
