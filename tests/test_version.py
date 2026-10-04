@@ -26,3 +26,9 @@ def test_no_stale_versions():
     for name in ("agent.py", "hook.sh", "install.sh", "README.md"):
         stale = [v for v in re.findall(r"\bv?2\.\d+(?:\.\d+)?\b", read(name)) if v.lstrip("v") != version()]
         assert not stale, f"{name}: {stale}"
+
+
+def test_readme_links_work_outside_github():
+    """PyPI shows the README too: relative links and images break there."""
+    import re
+    assert not re.findall(r"\]\((?!https?://|#)[^)]+\)", read("README.md"))

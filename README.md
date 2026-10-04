@@ -6,15 +6,15 @@
 <div align="center">
 
 [![CI](https://github.com/deltaxmodules/tuxaide/actions/workflows/ci.yml/badge.svg)](https://github.com/deltaxmodules/tuxaide/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-2.3.0-informational)](CHANGELOG.md)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Version](https://img.shields.io/badge/version-2.3.0-informational)](https://github.com/deltaxmodules/tuxaide/blob/main/CHANGELOG.md)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://github.com/deltaxmodules/tuxaide/blob/main/LICENSE)
 [![Ollama](https://img.shields.io/badge/Powered%20by-Ollama-blue)](https://ollama.com)
 [![Shell: bash/zsh](https://img.shields.io/badge/Shell-bash%20%7C%20zsh-lightgrey)](#requirements)
 [![Privacy: local by default](https://img.shields.io/badge/Privacy-local%20by%20default-brightgreen)](#privacy-what-is-kept-and-where)
 
-![TuxAide: a question typed in the terminal, the answer streaming in, its command put on the prompt, then a failed command explained by ?](site/public/img/tuxaide-demo.gif)
+![TuxAide: a question typed in the terminal, the answer streaming in, its command put on the prompt, then a failed command explained by ?](https://raw.githubusercontent.com/deltaxmodules/tuxaide/main/site/public/img/tuxaide-demo.gif)
 
-**[Manual](https://deltaxmodules.github.io/tuxaide/)** · [Demo video](https://deltaxmodules.github.io/tuxaide/#see-it-in-90-seconds) · [Changelog](CHANGELOG.md)
+**[Manual](https://deltaxmodules.github.io/tuxaide/)** · [Demo video](https://deltaxmodules.github.io/tuxaide/#see-it-in-90-seconds) · [Changelog](https://github.com/deltaxmodules/tuxaide/blob/main/CHANGELOG.md)
 
 </div>
 
@@ -252,7 +252,7 @@ command to read its error — only read-only commands without asking.
 
 ## Contributing
 
-Bug reports, fixes and ideas are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) (the tests need no
-Ollama) and [SECURITY.md](SECURITY.md). When reporting a bug, please paste the output of `tuxaide doctor`.
+Bug reports, fixes and ideas are welcome — see [CONTRIBUTING.md](https://github.com/deltaxmodules/tuxaide/blob/main/CONTRIBUTING.md) (the tests need no
+Ollama) and [SECURITY.md](https://github.com/deltaxmodules/tuxaide/blob/main/SECURITY.md). When reporting a bug, please paste the output of `tuxaide doctor`.
 
-[Changelog](CHANGELOG.md) · [MIT License](LICENSE) · Built with the help of AI tools (Claude, Ollama).
+[Changelog](https://github.com/deltaxmodules/tuxaide/blob/main/CHANGELOG.md) · [MIT License](https://github.com/deltaxmodules/tuxaide/blob/main/LICENSE) · Built with the help of AI tools (Claude, Ollama).
