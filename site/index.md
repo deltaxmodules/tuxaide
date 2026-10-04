@@ -65,4 +65,4 @@ It answers in the language you wrote in, with commands for *your* system (`dnf` 
 curl -fsSL https://raw.githubusercontent.com/deltaxmodules/tuxaide/main/setup.sh | bash
 ```
 
-Or `brew install deltaxmodules/tap/tuxaide`, `yay -S tuxaide`, `pipx install tuxaide` — then `tuxaide setup`. [Details](/guide/get-started).
+Or `brew install deltaxmodules/tap/tuxaide`, `pipx install tuxaide`, or the PKGBUILD on Arch — then `tuxaide setup`. [Details](/guide/get-started).
