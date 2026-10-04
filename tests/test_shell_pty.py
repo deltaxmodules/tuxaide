@@ -282,7 +282,8 @@ def test_off_disables_everything_and_persists(sh):
     sh.run("tuxaide off")
     for check in (sh, Shell(sh.name, sh.home)):       # this shell and a new one
         out = check.run("pyhton3 --version")
-        assert "command not found" in out and "Did you mean" not in out
+        # The shell's own answer (or Ubuntu's handler, when the system has it), not TuxAide's.
+        assert re.search(r"not found", out, re.I) and "🐧" not in out
         out = check.run("how do I list files")
         assert "TuxAide" not in out
         if check is not sh:
