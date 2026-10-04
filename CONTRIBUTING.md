@@ -35,6 +35,18 @@ python3 -m pip install ruff && ruff check .
 
 CI runs both, plus the tests on Linux (Python 3.9, 3.12, 3.13) and macOS.
 
+## Releasing
+
+The version lives in `__version__` in `agent.py`. To release:
+
+1. Bump `__version__`, `TUXAIDE_VERSION` in `install.sh` and the version badge in
+   `README.md` (`tests/test_version.py` fails if they differ).
+2. Merge to `main`, then create a GitHub release tagged `v<version>` (e.g. `v2.3.0`).
+
+`tuxaide update` installs the files of the latest release's tag and checks that
+`agent.py` there carries the same version as the tag, so the tag and
+`__version__` must match.
+
 ## Ground rules
 
 - **TuxAide never runs a command on its own.** It explains, suggests and puts

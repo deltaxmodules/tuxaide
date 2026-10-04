@@ -1,0 +1,34 @@
+name: Bug report
+description: Something doesn't work as expected
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you typed, what you expected, and what you got instead.
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `tuxaide doctor`
+      description: Run it in the terminal where the problem happens and paste everything it prints.
+      render: text
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How did you install TuxAide?
+      options:
+        - curl installer (setup.sh / install.sh)
+        - git clone + ./install.sh
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?
+      description: Your rc file setup (oh-my-zsh, starship, …), screenshots, logs.

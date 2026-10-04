@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import os
+import re
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -26,7 +27,8 @@ def home(tmp_path, monkeypatch):
     (h / ".config" / "tuxaide").mkdir(parents=True)
     monkeypatch.setenv("HOME", str(h))
     for var in ("TUXAIDE_SHELL_PID", "TUXAIDE_SHELL", "TUXAIDE_LAST_CMD",
-                "TUXAIDE_LAST_RC", "TUXAIDE_NAMES", "LC_ALL", "LC_MESSAGES"):
+                "TUXAIDE_LAST_RC", "TUXAIDE_NAMES", "TUXAIDE_HANDLER", "TUXAIDE_REPO",
+                "TUXAIDE_GITHUB_API", "TUXAIDE_GITHUB_RAW", "LC_ALL", "LC_MESSAGES"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("LANG", "en_US.UTF-8")
     return h
@@ -44,7 +46,7 @@ def write_config(home, **values):
 
 
 class FakeOllama:
-    """Minimal Ollama: /api/tags, streaming /api/chat, /api/embed(dings).
+    """Minimal Ollama: /api/tags, /api/version, /api/ps, streaming /api/chat, /api/embed(dings).
 
     `answer` is streamed back in small chunks; `error` makes /api/chat fail
     the way Ollama does (a JSON line with "error"); every request body is kept.
@@ -54,6 +56,8 @@ class FakeOllama:
         self.error = None
         self.batch_embed = True
         self.requests = []
+        self.models = []        # what /api/tags lists, e.g. [{"name": "fake", "size": 1}]
+        self.loaded = []        # what /api/ps lists
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -67,7 +71,11 @@ class FakeOllama:
                     self.wfile.write(payload)
 
             def do_GET(self):
-                self._send(200, b'{"models":[]}')
+                if self.path == "/api/version":
+                    return self._send(200, b'{"version":"0.0.0-fake"}')
+                if self.path == "/api/ps":
+                    return self._send(200, json.dumps({"models": fake.loaded}).encode())
+                self._send(200, json.dumps({"models": fake.models}).encode())
 
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])) or b"{}")
@@ -126,3 +134,62 @@ def run_agent(home, ollama):
                               capture_output=True, text=True, env=full_env,
                               stdin=subprocess.DEVNULL, timeout=60)
     return run
+
+
+class FakeGitHub:
+    """Serves a "latest release" and the raw files of that tag, like GitHub does
+    for `tuxaide update`. `files` maps a repository path to its content."""
+    REPO = "test/tuxaide"
+
+    def __init__(self):
+        self.tag = "v9.9.9"
+        self.files = {}
+        self.requests = []
+        fake = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                fake.requests.append(self.path)
+                if self.path == f"/api/repos/{fake.REPO}/releases/latest":
+                    body = json.dumps({"tag_name": fake.tag,
+                                       "html_url": f"https://example.invalid/{fake.tag}"}).encode()
+                else:
+                    prefix = f"/raw/{fake.REPO}/{fake.tag}/"
+                    name = self.path[len(prefix):] if self.path.startswith(prefix) else None
+                    if name not in fake.files:
+                        self.send_response(404)
+                        self.end_headers()
+                        return
+                    body = fake.files[name].encode()
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(body)
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        url = f"http://127.0.0.1:{self.server.server_address[1]}"
+        self.env = {"TUXAIDE_GITHUB_API": f"{url}/api", "TUXAIDE_GITHUB_RAW": f"{url}/raw",
+                    "TUXAIDE_REPO": self.REPO}
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def release(self, version, hook_extra=""):
+        """Publish `version`: the repository's files, with agent.py claiming that version."""
+        self.tag = f"v{version}"
+        for name in ("agent.py", "hook.sh", "session_writer.py", "uninstall.sh", "indexer.py"):
+            with open(os.path.join(REPO, name)) as f:
+                self.files[name] = f.read()
+        self.files["agent.py"] = re.sub(r'^__version__ = "[^"]+"', f'__version__ = "{version}"',
+                                        self.files["agent.py"], count=1, flags=re.M)
+        self.files["hook.sh"] += hook_extra
+
+    def close(self):
+        self.server.shutdown()
+
+
+@pytest.fixture
+def github():
+    server = FakeGitHub()
+    yield server
+    server.close()

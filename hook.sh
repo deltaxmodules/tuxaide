@@ -5,6 +5,7 @@ _TUX_CFG="${HOME}/.config/tuxaide/config.json"
 _TUX_SESSION_WRITER="${HOME}/.config/tuxaide/session_writer.py"
 _TUX_SESSION_FILE="${HOME}/.config/tuxaide/session.json"
 _TUX_PENDING_DIR="${HOME}/.config/tuxaide/pending"
+_TUX_HOOK="${HOME}/.config/tuxaide/hook.sh"
 
 # Lets TuxAide hand a chosen command back to *this* shell's prompt. The
 # command-not-found handler runs in a subshell, so it can't edit the prompt
@@ -29,9 +30,13 @@ print("true" if c.get("enabled", True) else "false",
       "true" if c.get("failure_hint", True) else "false")
 PYEOF
 }
-read -r _LG_ON _TUX_PREWARM _TUX_KEEP_ALIVE _TUX_MODEL _TUX_OLLAMA_URL _TUX_FAILURE_HINT <<CFGEOF
+# Also run after `tuxaide config` / `model`, so a change applies in this shell too.
+_tux_reload_cfg() {
+    read -r _LG_ON _TUX_PREWARM _TUX_KEEP_ALIVE _TUX_MODEL _TUX_OLLAMA_URL _TUX_FAILURE_HINT <<CFGEOF
 $(_tux_load_cfg || echo "true once 10m qwen2.5-coder:7b http://localhost:11434 true")
 CFGEOF
+}
+_tux_reload_cfg
 
 _tux_session_capture_enabled() {
     python3 -c "import json,os; c=json.load(open(os.path.expanduser('${_TUX_CFG}'))); print(str(bool(c.get('session_capture', False))).lower())" 2>/dev/null
@@ -103,23 +108,7 @@ _tux_run() {
 }
 
 tuxaide() {
-    [[ -z "${1:-}" ]] && {
-        echo "🐧 TuxAide v2.1"
-        echo "   tuxaide <question>            — ask a question"
-        echo "   ?  [question]                 — explain why the last command failed"
-        echo "   tuxaide new                   — start a new conversation (forget follow-ups)"
-        echo "   tuxaide history               — show your recent questions"
-        echo "   tuxaide system                — show what TuxAide tells the model about this machine"
-        echo "   tuxaide on / off              — enable / disable hook"
-        echo "   tuxaide status                — show status and mode"
-        echo "   tuxaide mode [llm|smart|deep] — switch knowledge mode"
-        echo "   tuxaide run <cmd>             — run and capture shell context"
-        echo "   tuxaide model <name>          — change Ollama model"
-        echo "   tuxaide index <cmd>           — index a man page"
-        echo "   tuxaide reindex               — re-index all man pages"
-        echo "   tuxaide --timing              — show recent query performance"
-        return
-    }
+    [[ -z "${1:-}" ]] && { "$_LG" help; return; }
     case "$1" in
         on)
             _LG_ON=true
@@ -145,14 +134,41 @@ tuxaide() {
             shift
             _tux_agent --why "${_TUX_LAST_CMD:-}" "${_TUX_LAST_RC:-}" "$@"
             ;;
-        model|modelo)
-            local m="${2:-}"
-            [[ -z "$m" ]] && { echo "Usage: tuxaide model <name>"; return; }
-            "$_LG" --set model "$m" && echo "🐧 Model changed to: $m"
+        model|modelo|config)
+            "$_LG" "$@"
+            local rc=$?
+            _tux_reload_cfg
+            return "$rc"
             ;;
-        mode|index|reindex|--timing|new|history|system) "$_LG" "$@" ;;
+        doctor)
+            TUXAIDE_HANDLER="$(_tux_handler_state)" "$_LG" "$@"
+            ;;
+        update)
+            # A new hook.sh is loaded into this shell straight away.
+            local before rc
+            before="$(cksum < "$_TUX_HOOK" 2>/dev/null)"
+            "$_LG" "$@"
+            rc=$?
+            if [[ $rc -eq 0 && "$(cksum < "$_TUX_HOOK" 2>/dev/null)" != "$before" ]]; then
+                # shellcheck disable=SC1090
+                source "$_TUX_HOOK" && echo "🐧 New hook loaded in this terminal."
+            fi
+            return "$rc"
+            ;;
+        mode|index|reindex|--timing|new|history|system|cache|help|--help|-h|version|--version|-V) "$_LG" "$@" ;;
         *) "$_LG" --ask "$*" ;;
     esac
+}
+# For `tuxaide doctor`: is the command-not-found handler in this shell ours?
+_tux_handler_state() {
+    local body
+    if [[ -n "${ZSH_VERSION:-}" ]]; then
+        body="$(typeset -f command_not_found_handler 2>/dev/null)" || { echo none; return; }
+    else
+        (( BASH_VERSINFO[0] >= 4 )) || { echo old-bash; return; }
+        body="$(declare -f command_not_found_handle 2>/dev/null)" || { echo none; return; }
+    fi
+    [[ "$body" == *--not-found* ]] && echo ours || echo other
 }
 # Short alias, only if 'tux' isn't already taken by something else.
 type tux >/dev/null 2>&1 || alias tux='tuxaide'
