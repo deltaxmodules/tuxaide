@@ -288,3 +288,17 @@ def test_off_disables_everything_and_persists(sh):
         if check is not sh:
             check.close()
     sh.run("tuxaide on")
+
+
+# ── P6: follow-ups ───────────────────────────────────────────────────
+
+def test_followups_in_shell(sh, ollama):
+    sh.ask("how do I list hidden files")
+    out = sh.ask("e por tamanho?")
+    assert "follow-up" in out
+    assert ollama.chat_requests()[-1]["messages"][1]["content"] == "how do I list hidden files"
+    out = sh.ask("and by size")                        # no "?" — still a follow-up here
+    assert "follow-up" in out
+    sh.run("tuxaide new")
+    out = sh.run("and by size")                        # conversation closed: just a typo
+    assert "TuxAide (" not in out

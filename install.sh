@@ -556,6 +556,8 @@ defaults = {
     "action_menu": True,
     "failure_hint": True,
     "typo_suggest": True,
+    "followup_window": 600,
+    "followup_turns": 3,
 }
 existing = {}
 try:
