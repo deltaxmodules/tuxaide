@@ -57,8 +57,9 @@ The version lives in `__version__` in `agent.py`.
    checks the tag matches `__version__` and publishes the GitHub release with
    `install.sh`, `setup.sh`, `SHA256SUMS`, the wheel/sdist, and a filled-in
    `tuxaide.rb` and `PKGBUILD`.
-3. Homebrew: copy `tuxaide.rb` from the release to `Formula/tuxaide.rb` in the
-   `deltaxmodules/homebrew-tap` repository.
+3. Homebrew: copy `tuxaide.rb` from the release to `Formula/tuxaide.rb` in
+   [deltaxmodules/homebrew-tap](https://github.com/deltaxmodules/homebrew-tap) and push.
+   The manual is published to GitHub Pages by the same workflow.
 4. AUR: copy `PKGBUILD` and `tuxaide.install` to the `aur.archlinux.org/tuxaide.git`
    clone, run `makepkg --printsrcinfo > .SRCINFO`, commit and push.
 5. PyPI: `twine upload` the wheel and sdist from the release.
