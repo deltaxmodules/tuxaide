@@ -38,6 +38,10 @@ banner() {
     echo -e "${CY}${BOLD}╚══════════════════════════════════════════════════════╝${R}"
     echo ""
 }
+# One status row of the diagnosis box (53 columns inside): colour, mark, label, status.
+box_status() {
+    printf "  ${CY}│${R}  ${1}%s${R} %-24s ${1}%-24s${R}${CY}│${R}\n" "$2" "$3" "$4"
+}
 step()  { echo -e "\n${CY}${BOLD}[$((++STEP))/$TOTAL_STEPS] $*${R}"; }
 ok()    { echo -e "  ${GR}✓${R}  $*"; }
 warn()  { echo -e "  ${YL}⚠${R}  $*"; }
@@ -154,28 +158,28 @@ diagnose_system() {
     echo -e "  ${CY}${BOLD}┌─────────────────────────────────────────────────────┐${R}"
     echo -e "  ${CY}${BOLD}│  System Diagnosis Summary                           │${R}"
     echo -e "  ${CY}${BOLD}├─────────────────────────────────────────────────────┤${R}"
-    printf "  ${CY}│${R}  %-25s %-28s${CY}│${R}\n" "RAM:" "${RAM_GB} GB"
-    printf "  ${CY}│${R}  %-25s %-28s${CY}│${R}\n" "Free disk:" "${DISK_FREE_GB} GB available"
-    printf "  ${CY}│${R}  %-25s %-28s${CY}│${R}\n" "GPU:" "$GPU_INFO"
-    printf "  ${CY}│${R}  %-25s %-28s${CY}│${R}\n" "AI model:" "$MODEL ($MODEL_SIZE)"
+    printf "  ${CY}│${R}  %-22s %-28s${CY}│${R}\n" "RAM:" "${RAM_GB} GB"
+    printf "  ${CY}│${R}  %-22s %-28s${CY}│${R}\n" "Free disk:" "${DISK_FREE_GB} GB available"
+    printf "  ${CY}│${R}  %-22s %-28s${CY}│${R}\n" "GPU:" "$GPU_INFO"
+    printf "  ${CY}│${R}  %-22s %-28s${CY}│${R}\n" "AI model:" "$MODEL ($MODEL_SIZE)"
     echo -e "  ${CY}${BOLD}├─────────────────────────────────────────────────────┤${R}"
 
     # LLM mode assessment
     if [[ $RAM_GB -ge 5 && $DISK_FREE_GB -ge 6 ]]; then
-        echo -e "  ${CY}│${R}  ${GR}✓${R} LLM mode                 ${GR}READY${R}                    ${CY}│${R}"
+        box_status "$GR" "✓" "LLM mode" "READY"
     else
-        echo -e "  ${CY}│${R}  ${RD}✗${R} LLM mode                 ${RD}INSUFFICIENT RESOURCES${R}   ${CY}│${R}"
+        box_status "$RD" "✗" "LLM mode" "INSUFFICIENT RESOURCES"
     fi
 
     # RAG assessment
     if [[ "$RAG_CAPABLE" == "true" && $DISK_FREE_GB -ge 8 ]]; then
-        echo -e "  ${CY}│${R}  ${GR}✓${R} Smart RAG                ${GR}AVAILABLE${R}                ${CY}│${R}"
+        box_status "$GR" "✓" "Smart RAG" "AVAILABLE"
         RAG_AVAILABLE=true
     else
         if [[ "$RAG_CAPABLE" == "false" ]]; then
-            echo -e "  ${CY}│${R}  ${YL}⚠${R} Smart RAG                ${YL}RAM < 5 GB — not recommended${R} ${CY}│${R}"
+            box_status "$YL" "⚠" "Smart RAG" "RAM < 5 GB: not advised"
         else
-            echo -e "  ${CY}│${R}  ${YL}⚠${R} Smart RAG                ${YL}DISK SPACE LOW${R}           ${CY}│${R}"
+            box_status "$YL" "⚠" "Smart RAG" "DISK SPACE LOW"
         fi
         RAG_AVAILABLE=false
     fi
