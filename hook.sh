@@ -34,10 +34,16 @@ _tux_is_interactive_cmd() {
     esac
 }
 
+# `noglob` only exists in zsh. In bash, calling it from command_not_found_handle
+# is itself "command not found", which re-enters the handler forever.
+_tux_agent() {
+    if [[ -n "${ZSH_VERSION:-}" ]]; then noglob "$_LG" "$@"; else "$_LG" "$@"; fi
+}
+
 _tux_should_handle_question_line() {
     local line="$*"
     [[ -z "$line" ]] && return 1
-    noglob "$_LG" --check "$line" >/dev/null 2>&1
+    _tux_agent --check "$line" >/dev/null 2>&1
 }
 
 _tux_run() {
@@ -149,7 +155,7 @@ command_not_found_handle() {
     full_cmd=$(HISTTIMEFORMAT="" history 1 2>/dev/null | sed 's/^ *[0-9]* *//')
     local question="${full_cmd:-$*}"
     if _tux_should_handle_question_line "$question"; then
-        noglob "$_LG" --ask "$question"
+        _tux_agent --ask "$question"
         return 0
     fi
     echo "bash: $cmd: command not found" >&2
