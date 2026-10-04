@@ -105,7 +105,10 @@ def test_tuxaide_history_lists_questions(run_agent, ollama):
 
 def test_followup_without_question_mark_counts_only_in_open_conversation(run_agent, ollama, home):
     env = {"TUXAIDE_SHELL": "bash"}
-    assert run_agent("--not-found", "and", "by", "size", env=env).returncode == 1   # nothing open
+    p = run_agent("--not-found", "and", "by", "size", env=env)
+    # Nothing open: not a question. (Whether it gets a typo suggestion depends on
+    # the machine — CI runners have an `ant` command and an `and` package.)
+    assert p.returncode != 0 and ollama.chat_requests() == []
     run_agent("--ask", "how do I list hidden files")
     p = run_agent("--not-found", "and", "by", "size", env=env)
     assert p.returncode == 0
